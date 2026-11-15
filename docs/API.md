@@ -168,6 +168,29 @@ See [`rpc-errors.md`](rpc-errors.md) for the full taxonomy.
 | 500 | internal error |
 | 502 | upstream RPC error |
 
+## API versioning and deprecation policy
+
+### Relationship between URL version and `schema_version`
+
+The REST API uses two complementary version identifiers:
+
+- **URL path version (`/api/v1`):** Versions the HTTP transport surface (route paths, HTTP methods, authentication headers, and status-code semantics).
+- **Envelope `schema_version` (`"1.0"`):** Versions the JSON report envelope (`schema_version`, `kind`, `tool`, `version`, `data`) shared between the CLI (`--json`) and the HTTP API.
+
+Additive, backward-compatible changes (such as new optional request fields, new endpoints under `/api/v1`, or new optional report fields) are introduced in place without changing `/api/v1` or the major `schema_version`. Breaking changes to route contracts or required envelope fields require introducing a new API path prefix (for example `/api/v2`) and/or incrementing the major `schema_version`.
+
+### Lifecycle stages: adding, deprecating, and retiring a version
+
+1. **Addition (Active):**
+   - A new major API version is mounted alongside the existing version prefix and documented in `observatory-api::openapi::document()` and `CHANGELOG.md`.
+   - `GET /api/v1/version` reports the active `api_version` and `schema_version` so clients can verify compatibility programmatically.
+2. **Deprecation (Notice period):**
+   - Before an existing API version is retired, it enters a formal deprecation phase announced in `CHANGELOG.md`, release notes, and the OpenAPI specification (`deprecated: true` on affected operations).
+   - Responses from deprecated routes include standard HTTP deprecation headers (`Deprecation: true` and, when a successor route exists, `Link: </api/v2/...>; rel="successor-version"`) while continuing to serve requests normally.
+   - At least one minor release cycle of overlap is maintained between marking a version deprecated and retiring it so consumers can migrate and validate against the new version before removal.
+3. **Retirement (Removal):**
+   - Once retired in a subsequent major release, routes under the retired version prefix are removed from the route table and return `404` (`code: "not_found"`).
+
 ## OpenAPI synchronization
 
 `observatory-api::openapi::document()` is generated from the single route table
