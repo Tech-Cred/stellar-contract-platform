@@ -75,19 +75,22 @@ RPC fixture ──► observatory-rpc ──► observatory-deployment ──►
 
 ## Key decisions
 
-- **Never execute WASM.** Inspection is purely static, using a bounded streaming
+ Detailed rationale and consequences for each foundational decision are recorded
+in the [Architecture Decision Records (`docs/adr/`)](adr/README.md):
+
+- **[ADR-0001](adr/0001-never-execute-wasm.md) — Never execute WASM.** Inspection is purely static, using a bounded streaming
   parser (`wasmparser`).
 - **Real Stellar types.** Specification, events, and ledger entries use
   `stellar-xdr`; there is no bespoke wire format.
-- **Description vs. judgement.** `observatory-diff` enumerates changes;
+- **[ADR-0002](adr/0002-description-vs-judgement-split.md) — Description vs. judgement.** `observatory-diff` enumerates changes;
   `observatory-compat` applies an explicit policy. Compatibility is never a
   bare boolean.
-- **Canonical ordering.** Name-keyed collections are sorted; sequence-keyed
+- **[ADR-0005](adr/0005-canonical-deterministic-ordering.md) — Canonical ordering.** Name-keyed collections are sorted; sequence-keyed
   collections (parameters, fields, cases) preserve their declared order because
   that order is semantic.
-- **Offline by default.** No unit test touches the network. The RPC layer is
+- **[ADR-0003](adr/0003-fixture-first-rpc-transport.md) — Offline by default.** No unit test touches the network. The RPC layer is
   transport-agnostic and ships a deterministic mock/fixture transport.
-- **Machine-readable first.** Every report is wrapped in a versioned envelope.
+- **[ADR-0004](adr/0004-bounded-static-parsing.md) — Bounded static parsing & machine-readable envelopes.** Every input artifact and HTTP body is strictly bounded, and every report is wrapped in a versioned envelope.
 
 ## Extension points
 
