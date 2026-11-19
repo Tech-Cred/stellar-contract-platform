@@ -207,4 +207,14 @@ mod tests {
         assert!(content.get("text/plain").is_some());
         assert!(content.get("application/json").is_some());
     }
+
+    #[test]
+    fn openapi_document_is_structurally_valid() {
+        let document = document();
+        assert_eq!(document["openapi"].as_str(), Some(OPENAPI_VERSION));
+        assert!(document["info"]["title"].is_string());
+        assert!(document["info"]["version"].is_string());
+        assert!(document["components"]["schemas"]["Error"].is_object());
+        assert!(document["components"]["schemas"]["Report"].is_object());
+    }
 }

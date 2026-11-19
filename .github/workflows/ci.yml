@@ -122,3 +122,5 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: Validate OpenAPI document
+        run: cargo test -p observatory-api --lib openapi::tests
