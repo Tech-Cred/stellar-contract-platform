@@ -40,6 +40,37 @@ pub struct Principal {
     pub role: Role,
 }
 
+/// A pluggable API-key store.
+///
+/// Implementations must never store or log the plaintext key. The in-memory
+/// backend is the default for tests; [`crate::store::FileKeyStore`] persists
+/// only metadata and hashes so keys survive a restart.
+pub trait KeyStore: Send + Sync {
+    /// Generate a new key, returning the plaintext exactly once.
+    fn generate(&mut self, role: Role, label: &str) -> Result<(String, ApiKeyRecord)>;
+    /// Insert a record from a pre-computed hash (fixtures/imports).
+    fn insert_hashed(&mut self, id: &str, hash: &str, role: Role, label: &str) -> ApiKeyRecord;
+    /// Register a key from its plaintext form.
+    fn insert_plaintext(
+        &mut self,
+        plaintext: &str,
+        role: Role,
+        label: &str,
+    ) -> Result<ApiKeyRecord>;
+    /// Revoke a key by id.
+    fn revoke(&mut self, id: &str) -> bool;
+    /// Authenticate a presented key.
+    fn authenticate(&self, provided: &str) -> Option<Principal>;
+    /// List key metadata, sorted by id. Records never serialize the hash.
+    fn list(&self) -> Vec<ApiKeyRecord>;
+    /// Number of stored keys.
+    fn len(&self) -> usize;
+    /// Whether the store is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// An in-memory API-key store.
 #[derive(Debug, Default)]
 pub struct ApiKeyStore {
@@ -93,6 +124,15 @@ impl ApiKeyStore {
         record
     }
 
+    /// Insert a complete record, including its revocation state.
+    ///
+    /// Used when loading a persistent backend. The hash is expected to be an
+    /// already-computed SHA-256 digest.
+    pub fn insert_record(&mut self, record: ApiKeyRecord) -> ApiKeyRecord {
+        self.keys.insert(record.id.clone(), record.clone());
+        record
+    }
+
     /// Register a key from its plaintext form (`sco_<id>_<secret>`).
     ///
     /// Only the hash is stored. This is how a server is configured with keys
@@ -136,6 +176,15 @@ impl ApiKeyStore {
         }
     }
 
+    /// Key metadata, sorted by id.
+    ///
+    /// The returned records carry the hash in memory, but [`ApiKeyRecord`]
+    /// skips it during serialization.
+    #[must_use]
+    pub fn list(&self) -> Vec<ApiKeyRecord> {
+        self.keys.values().cloned().collect()
+    }
+
     /// The number of stored keys.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -168,6 +217,41 @@ impl ApiKeyStore {
             key_id: record.id.clone(),
             role: record.role,
         })
+    }
+}
+
+impl KeyStore for ApiKeyStore {
+    fn generate(&mut self, role: Role, label: &str) -> Result<(String, ApiKeyRecord)> {
+        ApiKeyStore::generate(self, role, label)
+    }
+
+    fn insert_hashed(&mut self, id: &str, hash: &str, role: Role, label: &str) -> ApiKeyRecord {
+        ApiKeyStore::insert_hashed(self, id, hash, role, label)
+    }
+
+    fn insert_plaintext(
+        &mut self,
+        plaintext: &str,
+        role: Role,
+        label: &str,
+    ) -> Result<ApiKeyRecord> {
+        ApiKeyStore::insert_plaintext(self, plaintext, role, label)
+    }
+
+    fn revoke(&mut self, id: &str) -> bool {
+        ApiKeyStore::revoke(self, id)
+    }
+
+    fn authenticate(&self, provided: &str) -> Option<Principal> {
+        ApiKeyStore::authenticate(self, provided)
+    }
+
+    fn list(&self) -> Vec<ApiKeyRecord> {
+        ApiKeyStore::list(self)
+    }
+
+    fn len(&self) -> usize {
+        ApiKeyStore::len(self)
     }
 }
 

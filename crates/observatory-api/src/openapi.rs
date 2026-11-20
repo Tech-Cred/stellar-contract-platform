@@ -161,6 +161,8 @@ fn summary_for(path: &str) -> &'static str {
         "/api/v1/contracts/compatibility" => "Assess interface compatibility",
         "/api/v1/contracts/fingerprint" => "Compute fingerprints",
         "/api/v1/contracts/security" => "Run security heuristics",
+        "/api/v1/keys" => "Create or list API keys",
+        "/api/v1/keys/{id}" => "Revoke an API key",
         _ => "Operation",
     }
 }

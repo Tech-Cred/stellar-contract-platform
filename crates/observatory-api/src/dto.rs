@@ -55,6 +55,16 @@ fn default_policy() -> String {
     "strict".to_string()
 }
 
+/// Request body for creating an API key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateKeyRequest {
+    /// Role to grant: `viewer`, `developer`, `maintainer`, or `admin`.
+    pub role: String,
+    /// Human-readable label.
+    pub label: String,
+}
+
 /// Decode a base64 WASM field with a hard size bound.
 pub fn decode_wasm(field: &str) -> Result<Vec<u8>> {
     let bytes = base64::engine::general_purpose::STANDARD
@@ -102,5 +112,19 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(compatibility.policy, "strict");
+    }
+
+    #[test]
+    fn parses_key_creation_requests_and_rejects_unknown_fields() {
+        let request: CreateKeyRequest = serde_json::from_value(json!({
+            "role": "admin", "label": "ops"
+        }))
+        .unwrap();
+        assert_eq!(request.role, "admin");
+        assert_eq!(request.label, "ops");
+        assert!(serde_json::from_value::<CreateKeyRequest>(json!({
+            "role": "admin", "label": "ops", "extra": true
+        }))
+        .is_err());
     }
 }

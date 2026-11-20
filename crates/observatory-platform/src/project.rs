@@ -4,6 +4,7 @@
 //! typo cannot silently disable a setting. The schema is intentionally small and
 //! only exposes settings that the implementation actually honours.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use observatory_core::{ObservatoryError, Result};
@@ -102,6 +103,9 @@ pub struct ApiSection {
     /// Optional rate-limit override.
     #[serde(default)]
     pub rate_limit: Option<RateLimitSection>,
+    /// Optional per-route limits, keyed by exact request path.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub route_limits: BTreeMap<String, RateLimitSection>,
 }
 
 fn default_true() -> bool {
@@ -113,6 +117,7 @@ impl Default for ApiSection {
         ApiSection {
             require_auth: true,
             rate_limit: None,
+            route_limits: BTreeMap::new(),
         }
     }
 }
@@ -222,6 +227,24 @@ impl ProjectConfig {
             .unwrap_or_default()
     }
 
+    /// Resolve per-route rate-limit overrides, keyed by exact request path.
+    #[must_use]
+    pub fn route_limits(&self) -> BTreeMap<String, RateLimitConfig> {
+        self.api
+            .route_limits
+            .iter()
+            .map(|(path, section)| {
+                (
+                    path.clone(),
+                    RateLimitConfig {
+                        limit: section.limit,
+                        window_secs: section.window_secs,
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Resolve the default network label, if configured.
     pub fn network(&self) -> Option<&str> {
         self.project.network.as_deref()
@@ -261,6 +284,12 @@ mod tests {
         assert!(!config.api.require_auth);
         assert_eq!(config.rate_limit().limit, 5);
         assert_eq!(config.rate_limit().window_secs, 30);
+
+        let toml = "[api]\n[api.rate_limit]\nlimit = 60\nwindow_secs = 60\n[api.route_limits.\"/api/v1/contracts/inspect\"]\nlimit = 3\nwindow_secs = 60\n";
+        let config = ProjectConfig::parse(toml, ConfigFormat::Toml).unwrap();
+        let route_limits = config.route_limits();
+        assert_eq!(route_limits.len(), 1);
+        assert_eq!(route_limits["/api/v1/contracts/inspect"].limit, 3);
     }
 
     #[test]
