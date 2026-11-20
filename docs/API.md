@@ -35,7 +35,9 @@ X-API-Key: sco_<id>_<secret>
 ```
 
 Keys are random; only a SHA-256 hash is stored, and the hash is never returned.
-The plaintext is shown exactly once at creation.
+The plaintext is shown exactly once at creation. The default store is in memory;
+a `FileKeyStore` persists only ids, hashes, roles, labels, and revocation state,
+so keys survive a restart without ever writing the plaintext to disk.
 
 | Status | Body `code` | Meaning |
 | ------ | ----------- | ------- |
@@ -59,7 +61,8 @@ never endpoints, keys, or payloads.
 
 ## Rate limiting
 
-Fixed-window, keyed by API-key id (or client IP when unauthenticated).
+Fixed-window, keyed by API-key id (or client IP when unauthenticated) **and** the
+request path, so every endpoint has its own window.
 
 ```
 X-RateLimit-Limit: 120
@@ -67,8 +70,11 @@ X-RateLimit-Remaining: 119
 X-RateLimit-Reset: 60
 ```
 
-Exceeding the limit returns `429` with `code: "rate_limited"`. Limits are
-configurable via `PlatformConfig` (`rate_limit.limit`, `rate_limit.window_secs`).
+Exceeding the limit returns `429` with `code: "rate_limited"`. The default is
+`PlatformConfig.rate_limit`. A stricter limit for one route does not affect the
+others: set `PlatformConfig.route_limits["<exact path>"]` (or
+`api.route_limits` in the project file). The headers always report the effective
+limit for the request's route.
 
 ## Request IDs
 
@@ -106,6 +112,34 @@ successful contract analyses, responses with a `4xx`/`5xx` status, and requests
 rejected by the rate limiter. The exposition is deterministic and contains no
 secrets.
 
+### `POST /api/v1/keys` (admin)
+
+Creates an API key. Requires `manage_keys`.
+
+Body: `{ "role": "viewer|developer|maintainer|admin", "label": "ci" }`.
+
+The response (`201`) contains the plaintext exactly once. It is never retrievable
+again, and listing never returns it. The response also includes the key id, role,
+and label.
+
+```json
+{ "schema_version": "1.0", "kind": "api_key", "tool": "stellar-contract-platform", "version": "0.1.0", "data": { "id": "...", "role": "developer", "label": "ci", "plaintext": "sco_...", "note": "the plaintext key is shown once and cannot be retrieved again" } }
+```
+
+### `GET /api/v1/keys` (admin)
+
+Lists key metadata (id, role, label, revocation state). Requires `manage_keys`.
+Hashes, secrets, and plaintext are never included.
+
+```json
+{ "schema_version": "1.0", "kind": "api_keys", "tool": "stellar-contract-platform", "version": "0.1.0", "data": { "keys": [ { "id": "...", "role": "developer", "label": "ci", "revoked": false } ] } }
+```
+
+### `DELETE /api/v1/keys/{id}` (admin)
+
+Revokes a key. Requires `manage_keys`. Revocation takes effect immediately; the
+next request with that key receives `401`. An unknown id returns `404`.
+
 ### `POST /api/v1/contracts/inspect`
 Body: `{ "wasm_base64": "...", "security": false }`.
 Returns the WASM report, the canonical interface (when present), and the audit
@@ -128,6 +162,22 @@ Body: `{ "wasm_base64": "..." }`. Returns artifact and interface fingerprints.
 
 ### `POST /api/v1/contracts/security`
 Body: `{ "wasm_base64": "..." }`. Returns bounded heuristic findings.
+
+## Webhook delivery
+
+`observatory-platform::webhook::deliver` signs an event and delivers it with
+bounded retries; registration endpoints are tracked separately in issue #47.
+
+- The signature is HMAC-SHA256 over `<timestamp>.<body>`.
+- Every attempt carries `X-Observatory-Signature: sha256=<hex>`,
+  `X-Observatory-Timestamp`, `X-Observatory-Event`, and a stable
+  `X-Observatory-Delivery-Id` for replay protection.
+- Transient failures (`408`, `429`, `5xx`, and transport errors) are retried with
+  exponential backoff up to a cap. Other `4xx` responses are not retried.
+- The returned `DeliveryOutcome` records every attempt, the final status, and the
+  last status or error.
+
+See [webhooks.md](webhooks.md) for the verification steps.
 
 ## Response envelope
 
@@ -156,6 +206,7 @@ See [`rpc-errors.md`](rpc-errors.md) for the full taxonomy.
 | Status | Meaning |
 | ------ | ------- |
 | 200 | success |
+| 201 | resource created (API key) |
 | 400 | invalid request or artifact |
 | 401 | authentication required or invalid |
 | 403 | authenticated but not permitted |
@@ -176,7 +227,9 @@ specification cannot silently drift.
 
 ## Not included
 
-- Webhook management endpoints (planned).
+- Webhook management endpoints (registration is tracked in #47). The signed
+  delivery engine is implemented in `observatory-platform`.
 - Deployment/verification endpoints over live RPC (blocked on the live
   transport, issue #13).
-- Persistence of keys, users, or audit events (planned).
+- Persistence of users or audit events. API-key persistence is available through
+  `FileKeyStore`; the default remains in memory.

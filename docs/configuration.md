@@ -36,6 +36,10 @@ api:
   rate_limit:
     limit: 120
     window_secs: 60
+  route_limits:
+    /api/v1/contracts/inspect:
+      limit: 10
+      window_secs: 60
 
 ci:
   fail_on: MISMATCH       # statuses that should fail a build
@@ -56,6 +60,10 @@ require_auth = false
 [api.rate_limit]
 limit = 60
 window_secs = 30
+
+[api.route_limits."/api/v1/contracts/inspect"]
+limit = 10
+window_secs = 60
 ```
 
 ## What the file affects
@@ -66,6 +74,7 @@ window_secs = 30
 | `analysis.compatibility.policy` | Default policy for `compat` when `--policy` is omitted. |
 | `api.require_auth` | Default authentication requirement for `api serve`. |
 | `api.rate_limit` | Default rate limit for `api serve`. |
+| `api.route_limits` | Per-route rate-limit overrides, keyed by exact request path. Unlisted routes use `api.rate_limit`. |
 | `rpc.endpoint` | Documented default endpoint (recorded; live transport is future work). |
 | `ci.fail_on` | Documented CI failure policy (advisory in this build). |
 

@@ -4,19 +4,22 @@
 //! and returns a [`Response`]. The HTTP adapter in `crate::http` is a thin
 //! wrapper, so the routing logic is fully unit-testable without sockets.
 
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use observatory_core::{ObservatoryError, Result as CoreResult, SCHEMA_VERSION, TOOL_NAME};
 use observatory_output::report;
 use observatory_platform::{
-    authorize, ApiKeyStore, CompatibilityPolicy, Observatory, Permission, PlatformConfig,
-    Principal, RateLimiter, Role,
+    authorize, ApiKeyRecord, ApiKeyStore, CompatibilityPolicy, KeyStore, Observatory, Permission,
+    PlatformConfig, Principal, RateLimiter, Role,
 };
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::dto::{decode_wasm, CompatibilityRequest, DiffRequest, InspectRequest, WasmRequest};
+use crate::dto::{
+    decode_wasm, CompatibilityRequest, CreateKeyRequest, DiffRequest, InspectRequest, WasmRequest,
+};
 use crate::http::{Request, Response};
 use crate::metrics::{self, Metrics};
 
@@ -39,6 +42,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/contracts/compatibility"),
     ("POST", "/api/v1/contracts/fingerprint"),
     ("POST", "/api/v1/contracts/security"),
+    ("POST", "/api/v1/keys"),
+    ("GET", "/api/v1/keys"),
+    ("DELETE", "/api/v1/keys/{id}"),
 ];
 
 /// An API error with an HTTP status and a stable code.
@@ -76,6 +82,10 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         ApiError::new(400, "bad_request", message)
     }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        ApiError::new(404, "not_found", message)
+    }
 }
 
 impl From<ObservatoryError> for ApiError {
@@ -101,7 +111,7 @@ impl From<ObservatoryError> for ApiError {
 /// The API application.
 pub struct Api {
     observatory: Observatory,
-    keys: RwLock<ApiKeyStore>,
+    keys: RwLock<Box<dyn KeyStore>>,
     limiter: RateLimiter,
     config: PlatformConfig,
     counter: AtomicU64,
@@ -112,10 +122,19 @@ impl Api {
     /// Create an API with the given configuration and no keys.
     #[must_use]
     pub fn new(config: PlatformConfig) -> Self {
+        Self::with_key_store(config, Box::new(ApiKeyStore::new()))
+    }
+
+    /// Create an API backed by an explicit key store.
+    ///
+    /// Use this to plug in [`observatory_platform::FileKeyStore`] so keys
+    /// survive a restart.
+    #[must_use]
+    pub fn with_key_store(config: PlatformConfig, keys: Box<dyn KeyStore>) -> Self {
         let limiter = RateLimiter::new(config.rate_limit);
         Api {
             observatory: Observatory::new(),
-            keys: RwLock::new(ApiKeyStore::new()),
+            keys: RwLock::new(keys),
             limiter,
             config,
             counter: AtomicU64::new(0),
@@ -144,8 +163,10 @@ impl Api {
         role: Role,
         label: &str,
     ) {
+        let id = id.into();
+        let hash = hash.into();
         let mut keys = self.keys.write().expect("key store poisoned");
-        keys.insert_hashed(id, hash, role, label);
+        keys.insert_hashed(&id, &hash, role, label);
     }
 
     /// Register a key from its plaintext form (`sco_<id>_<secret>`).
@@ -153,6 +174,13 @@ impl Api {
         let mut keys = self.keys.write().expect("key store poisoned");
         keys.insert_plaintext(plaintext, role, label)?;
         Ok(())
+    }
+
+    /// Key metadata, sorted by id. Never includes hashes or plaintext.
+    #[must_use]
+    pub fn list_keys(&self) -> Vec<ApiKeyRecord> {
+        let keys = self.keys.read().expect("key store poisoned");
+        keys.list()
     }
 
     /// Revoke a key.
@@ -174,7 +202,11 @@ impl Api {
             .as_ref()
             .map(|principal| principal.key_id.clone())
             .unwrap_or_else(|| format!("client:{client_id}"));
-        let decision = self.limiter.check(&rate_key, now_secs);
+        // Each route keeps its own window so a strict analysis limit cannot
+        // starve cheap health checks for the same caller.
+        let route_key = format!("{rate_key}|{}", request.path);
+        let limit = self.config.rate_limit_for(&request.path);
+        let decision = self.limiter.check_with(limit, &route_key, now_secs);
 
         let mut response = if !decision.allowed {
             error_response(429, "rate_limited", "rate limit exceeded")
@@ -264,6 +296,54 @@ impl Api {
                     "api_version": "v1",
                 }),
             )),
+            ("POST", "/api/v1/keys") => {
+                self.require(principal, Permission::ManageKeys)?;
+                let body: CreateKeyRequest = parse_json(request)?;
+                if body.label.trim().is_empty() {
+                    return Err(ApiError::bad_request("label must not be empty"));
+                }
+                let role = Role::from_str(&body.role).map_err(ApiError::bad_request)?;
+                let (plaintext, record) = {
+                    let mut keys = self.keys.write().expect("key store poisoned");
+                    keys.generate(role, &body.label).map_err(ApiError::from)?
+                };
+                Ok(response(
+                    201,
+                    "api_key",
+                    &serde_json::json!({
+                        "id": record.id,
+                        "role": record.role,
+                        "label": record.label,
+                        "plaintext": plaintext,
+                        "note": "the plaintext key is shown once and cannot be retrieved again",
+                    }),
+                ))
+            }
+            ("GET", "/api/v1/keys") => {
+                self.require(principal, Permission::ManageKeys)?;
+                let keys = self.list_keys();
+                Ok(response(
+                    200,
+                    "api_keys",
+                    &serde_json::json!({ "keys": keys }),
+                ))
+            }
+            ("DELETE", path) if path.starts_with("/api/v1/keys/") => {
+                self.require(principal, Permission::ManageKeys)?;
+                let id = path.trim_start_matches("/api/v1/keys/");
+                if id.is_empty() || id.contains('/') {
+                    return Err(ApiError::not_found("unknown API key"));
+                }
+                if self.revoke_key(id) {
+                    Ok(response(
+                        200,
+                        "api_key_revoked",
+                        &serde_json::json!({ "id": id, "revoked": true }),
+                    ))
+                } else {
+                    Err(ApiError::not_found("unknown API key"))
+                }
+            }
             ("GET", "/api/v1/metrics") => {
                 let snapshot = self.metrics.snapshot();
                 if wants_json(request) {
@@ -556,6 +636,7 @@ mod tests {
                 limit: 1,
                 window_secs: 60,
             },
+            ..PlatformConfig::default()
         };
         let api = Api::new(config);
         assert_eq!(api.handle(&get("/api/v1/health"), "ip", 0).status, 200);
@@ -572,6 +653,139 @@ mod tests {
         let (api, key) = api_with_developer();
         let request = with_key(post("/api/v1/contracts/spec", serde_json::json!({})), &key);
         assert_eq!(api.handle(&request, "ip", 0).status, 400);
+    }
+
+    fn api_with_admin() -> (Api, String) {
+        let api = Api::new(PlatformConfig::default());
+        let key = api.generate_key(Role::Admin, "admin").unwrap();
+        (api, key)
+    }
+
+    fn delete(path: &str) -> Request {
+        Request {
+            method: "DELETE".to_string(),
+            path: path.to_string(),
+            query: None,
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn key_management_requires_the_manage_keys_permission() {
+        let api = Api::new(PlatformConfig::default());
+        let viewer = api.generate_key(Role::Viewer, "readonly").unwrap();
+        let developer = api.generate_key(Role::Developer, "dev").unwrap();
+
+        let create = post(
+            "/api/v1/keys",
+            serde_json::json!({ "role": "viewer", "label": "x" }),
+        );
+        assert_eq!(api.handle(&create, "ip", 0).status, 401);
+        assert_eq!(api.handle(&with_key(create, &viewer), "ip", 0).status, 403);
+        assert_eq!(
+            api.handle(&with_key(get("/api/v1/keys"), &developer), "ip", 0)
+                .status,
+            403
+        );
+    }
+
+    #[test]
+    fn admin_can_create_list_and_revoke_keys() {
+        let (api, admin) = api_with_admin();
+        let create = with_key(
+            post(
+                "/api/v1/keys",
+                serde_json::json!({ "role": "developer", "label": "ci" }),
+            ),
+            &admin,
+        );
+        let response = api.handle(&create, "ip", 0);
+        assert_eq!(response.status, 201);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        let data = &body["data"];
+        let plaintext = data["plaintext"].as_str().unwrap().to_string();
+        let id = data["id"].as_str().unwrap().to_string();
+        assert!(plaintext.starts_with("sco_"));
+
+        let list = api.handle(&with_key(get("/api/v1/keys"), &admin), "ip", 0);
+        assert_eq!(list.status, 200);
+        let listed = String::from_utf8(list.body).unwrap();
+        assert!(listed.contains(&id));
+        assert!(
+            !listed.contains(&plaintext),
+            "listing must never leak plaintext"
+        );
+        assert!(
+            !listed.contains("\"hash\""),
+            "listing must never leak hashes"
+        );
+        assert!(!listed.contains("\"plaintext\""));
+
+        let analysis = with_key(
+            post(
+                "/api/v1/contracts/inspect",
+                serde_json::json!({ "wasm_base64": contract() }),
+            ),
+            &plaintext,
+        );
+        assert_eq!(api.handle(&analysis, "ip", 0).status, 200);
+
+        let revoke = with_key(delete(&format!("/api/v1/keys/{id}")), &admin);
+        assert_eq!(api.handle(&revoke, "ip", 0).status, 200);
+        assert_eq!(api.handle(&analysis, "ip", 0).status, 401);
+
+        let missing = with_key(delete("/api/v1/keys/does-not-exist"), &admin);
+        assert_eq!(api.handle(&missing, "ip", 0).status, 404);
+    }
+
+    #[test]
+    fn key_creation_rejects_an_unknown_role() {
+        let (api, admin) = api_with_admin();
+        let create = with_key(
+            post(
+                "/api/v1/keys",
+                serde_json::json!({ "role": "superuser", "label": "x" }),
+            ),
+            &admin,
+        );
+        assert_eq!(api.handle(&create, "ip", 0).status, 400);
+    }
+
+    #[test]
+    fn per_route_limits_do_not_affect_other_routes() {
+        let mut route_limits = std::collections::BTreeMap::new();
+        route_limits.insert(
+            "/api/v1/version".to_string(),
+            observatory_platform::RateLimitConfig {
+                limit: 1,
+                window_secs: 60,
+            },
+        );
+        let config = PlatformConfig {
+            route_limits,
+            rate_limit: observatory_platform::RateLimitConfig {
+                limit: 10,
+                window_secs: 60,
+            },
+            ..PlatformConfig::default()
+        };
+        let api = Api::new(config);
+
+        assert_eq!(api.handle(&get("/api/v1/version"), "ip", 0).status, 200);
+        let limited = api.handle(&get("/api/v1/version"), "ip", 0);
+        assert_eq!(limited.status, 429);
+        assert!(limited
+            .headers
+            .iter()
+            .any(|(name, value)| name == "X-RateLimit-Limit" && value == "1"));
+
+        let health = api.handle(&get("/api/v1/health"), "ip", 0);
+        assert_eq!(health.status, 200);
+        assert!(health
+            .headers
+            .iter()
+            .any(|(name, value)| name == "X-RateLimit-Limit" && value == "10"));
     }
 
     fn metrics_snapshot(api: &Api) -> serde_json::Value {

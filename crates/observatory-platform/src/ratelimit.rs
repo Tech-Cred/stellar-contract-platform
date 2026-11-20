@@ -72,25 +72,38 @@ impl RateLimiter {
 
     /// Check and consume one request for `key` at time `now_secs`.
     pub fn check(&self, key: &str, now_secs: u64) -> RateLimitDecision {
+        self.check_with(self.config, key, now_secs)
+    }
+
+    /// Check and consume one request using an explicit limit.
+    ///
+    /// Callers combine the route with the caller identity in `key` so each
+    /// endpoint gets its own window while sharing the same limiter state.
+    pub fn check_with(
+        &self,
+        config: RateLimitConfig,
+        key: &str,
+        now_secs: u64,
+    ) -> RateLimitDecision {
         let mut windows = self.windows.lock().expect("rate limiter poisoned");
         let window = windows.entry(key.to_string()).or_insert(Window {
             count: 0,
             start: now_secs,
         });
-        if now_secs.saturating_sub(window.start) >= self.config.window_secs {
+        if now_secs.saturating_sub(window.start) >= config.window_secs {
             window.count = 0;
             window.start = now_secs;
         }
         let elapsed = now_secs.saturating_sub(window.start);
-        let reset_after_secs = self.config.window_secs.saturating_sub(elapsed);
-        let allowed = window.count < self.config.limit;
+        let reset_after_secs = config.window_secs.saturating_sub(elapsed);
+        let allowed = window.count < config.limit;
         if allowed {
             window.count += 1;
         }
-        let remaining = self.config.limit.saturating_sub(window.count);
+        let remaining = config.limit.saturating_sub(window.count);
         RateLimitDecision {
             allowed,
-            limit: self.config.limit,
+            limit: config.limit,
             remaining,
             reset_after_secs,
         }
@@ -125,6 +138,25 @@ mod tests {
         assert!(limiter.check("k", 0).allowed);
         assert!(!limiter.check("k", 5).allowed);
         assert!(limiter.check("k", 10).allowed);
+    }
+
+    #[test]
+    fn explicit_configs_are_isolated_per_key() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            limit: 10,
+            window_secs: 60,
+        });
+        let strict = RateLimitConfig {
+            limit: 1,
+            window_secs: 60,
+        };
+        assert!(limiter.check_with(strict, "route:a", 0).allowed);
+        assert!(!limiter.check_with(strict, "route:a", 0).allowed);
+        assert!(limiter.check_with(strict, "route:b", 0).allowed);
+        assert!(
+            limiter.check("route:a", 0).allowed,
+            "a different key is unaffected"
+        );
     }
 
     #[test]
