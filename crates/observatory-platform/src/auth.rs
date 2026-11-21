@@ -125,6 +125,17 @@ impl ApiKeyStore {
         Ok(record)
     }
 
+    /// Change a live key's role. Returns whether the key was updated.
+    pub fn set_role(&mut self, id: &str, role: Role) -> bool {
+        match self.keys.get_mut(id) {
+            Some(record) if !record.revoked => {
+                record.role = role;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Revoke a key by id. Returns whether a key was revoked.
     pub fn revoke(&mut self, id: &str) -> bool {
         match self.keys.get_mut(id) {

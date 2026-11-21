@@ -130,6 +130,27 @@ impl Observatory {
         parse_events_str(json)
     }
 
+    /// Parse and filter an event fixture supplied as a JSON value.
+    pub fn events_filtered(
+        &self,
+        value: &serde_json::Value,
+        contract: Option<&str>,
+        topic: Option<&str>,
+        event_type: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<EventRecord>> {
+        let events = observatory_events::parse_events(value)?;
+        Ok(observatory_events::filter(
+            &events,
+            &observatory_events::EventFilter {
+                contract: contract.map(str::to_string),
+                topic: topic.map(str::to_string),
+                event_type: event_type.map(str::to_string),
+                limit,
+            },
+        ))
+    }
+
     /// Verify a local artifact against a deployment over a transport.
     pub fn verify<T: Transport>(
         &self,

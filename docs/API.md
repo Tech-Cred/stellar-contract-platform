@@ -146,6 +146,44 @@ Body: `{ "wasm_base64": "..." }`. Returns artifact and interface fingerprints.
 ### `POST /api/v1/contracts/security`
 Body: `{ "wasm_base64": "..." }`. Returns bounded heuristic findings.
 
+### `POST /api/v1/contracts/events`
+Fixture-backed event query. Body:
+
+```json
+{
+  "fixture": { "events": [ ... ] },
+  "contract": "C...",
+  "topic": "transfer",
+  "type": "contract",
+  "limit": 100
+}
+```
+
+`fixture` accepts the same shapes as the CLI (an array, an object with an
+`events` array, a raw event object, or a base64 `ContractEvent`). Filters are
+applied in the order contract, type, topic, then limit. `limit` defaults to 100
+and is bounded to 1000. Malformed fixtures return a structured `400`.
+
+### `GET /api/v1/jobs` and `POST /api/v1/jobs`
+In-process background jobs for long-running work. Enqueue with:
+
+```json
+{ "kind": "analysis", "idempotency_key": "optional", "max_attempts": 3 }
+```
+
+Repeating an `idempotency_key` returns the existing job. `GET /api/v1/jobs`
+lists jobs; `GET /api/v1/jobs?id=<id>` returns one job. States are `queued`,
+`running`, `succeeded`, `failed`, and `cancelled`. Concurrency is bounded and
+failures are recorded and retried up to `max_attempts`.
+
+### `POST /api/v1/jobs/cancel`
+Body `{ "id": "job-..." }`. Only queued jobs can be cancelled; anything else
+returns a structured `400`.
+
+### `GET /api/v1/audit/events`
+Requires `manage_keys` (admin). Returns structured audit events with
+`schema_version`, `timestamp`, `actor` (public key id), `action`, `resource`,
+`outcome`, and `request_id`. Secrets and plaintext keys are never recorded.
 ### Webhook subscriptions
 
 Webhook registration requires `manage_webhooks` (the `maintainer` or `admin`
@@ -209,6 +247,12 @@ See [`rpc-errors.md`](rpc-errors.md) for the full taxonomy.
 and a test asserts every route is documented and vice versa, so the
 specification cannot silently drift.
 
+Every `POST` route publishes a concrete request schema (`InspectRequest`,
+`WasmRequest`, `DiffRequest`, `CompatibilityRequest`, `EventsRequest`,
+`CreateJobRequest`, `CancelJobRequest`) instead of a generic object. Each schema
+is closed to unknown fields and declares its required inputs; tests assert the
+references and required fields stay in sync.
+
 ## Client SDKs
 
 Typed Rust and TypeScript clients live under `crates/observatory-client` and
@@ -218,4 +262,5 @@ Typed Rust and TypeScript clients live under `crates/observatory-client` and
 
 - Deployment/verification endpoints over live RPC (blocked on the live
   transport, issue #13).
-- Persistence of keys, users, webhooks, or audit events (planned).
+- Durable persistence of keys, users, webhooks, jobs, or audit events across
+  restarts (the in-process stores are bounded and reset with the process).

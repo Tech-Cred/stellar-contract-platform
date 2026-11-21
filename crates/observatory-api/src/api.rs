@@ -10,15 +10,15 @@ use std::sync::RwLock;
 use observatory_core::{ObservatoryError, Result as CoreResult, SCHEMA_VERSION, TOOL_NAME};
 use observatory_output::report;
 use observatory_platform::{
-    authorize, ApiKeyStore, CompatibilityPolicy, Observatory, Permission, PlatformConfig,
-    Principal, RateLimiter, Role, WebhookEvent, WebhookStore,
+    authorize, ApiKeyStore, AuditEvent, AuditLog, CompatibilityPolicy, JobQueue, Observatory,
+    Permission, PlatformConfig, Principal, RateLimiter, Role, WebhookEvent, WebhookStore,
 };
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::dto::{
-    decode_wasm, CompatibilityRequest, CreateWebhookRequest, DiffRequest, InspectRequest,
-    UpdateWebhookRequest, WasmRequest,
+    decode_wasm, CancelJobRequest, CompatibilityRequest, CreateJobRequest, CreateWebhookRequest,
+    DiffRequest, EventsRequest, InspectRequest, UpdateWebhookRequest, WasmRequest,
 };
 use crate::http::{Request, Response};
 use crate::metrics::{self, Metrics};
@@ -42,12 +42,20 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/contracts/compatibility"),
     ("POST", "/api/v1/contracts/fingerprint"),
     ("POST", "/api/v1/contracts/security"),
+    ("POST", "/api/v1/contracts/events"),
+    ("POST", "/api/v1/jobs"),
+    ("GET", "/api/v1/jobs"),
+    ("POST", "/api/v1/jobs/cancel"),
+    ("GET", "/api/v1/audit/events"),
     ("POST", "/api/v1/webhooks"),
     ("GET", "/api/v1/webhooks"),
     ("GET", "/api/v1/webhooks/{id}"),
     ("PATCH", "/api/v1/webhooks/{id}"),
     ("DELETE", "/api/v1/webhooks/{id}"),
 ];
+
+/// Maximum number of events returned by one `/contracts/events` request.
+pub const MAX_EVENT_RESULTS: usize = 1000;
 
 /// An API error with an HTTP status and a stable code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +118,8 @@ impl From<ObservatoryError> for ApiError {
 pub struct Api {
     observatory: Observatory,
     keys: RwLock<ApiKeyStore>,
+    audit: RwLock<AuditLog>,
+    jobs: RwLock<JobQueue>,
     webhooks: RwLock<WebhookStore>,
     limiter: RateLimiter,
     config: PlatformConfig,
@@ -125,12 +135,37 @@ impl Api {
         Api {
             observatory: Observatory::new(),
             keys: RwLock::new(ApiKeyStore::new()),
+            audit: RwLock::new(AuditLog::default()),
+            jobs: RwLock::new(JobQueue::new(2)),
             webhooks: RwLock::new(WebhookStore::new()),
             limiter,
             config,
             counter: AtomicU64::new(0),
             metrics: Metrics::new(),
         }
+    }
+
+    /// Retained audit events, oldest first.
+    #[must_use]
+    pub fn audit_events(&self) -> Vec<AuditEvent> {
+        self.audit.read().expect("audit log poisoned").snapshot()
+    }
+
+    fn record_audit(
+        &self,
+        actor: Option<String>,
+        action: &str,
+        resource: &str,
+        outcome: &str,
+        request_id: Option<String>,
+        timestamp: u64,
+    ) {
+        self.audit
+            .write()
+            .expect("audit log poisoned")
+            .record(AuditEvent::new(
+                timestamp, actor, action, resource, outcome, request_id,
+            ));
     }
 
     /// The active configuration.
@@ -141,8 +176,18 @@ impl Api {
 
     /// Generate a key and return its plaintext exactly once.
     pub fn generate_key(&self, role: Role, label: &str) -> CoreResult<String> {
-        let mut keys = self.keys.write().expect("key store poisoned");
-        let (plaintext, _record) = keys.generate(role, label)?;
+        let (plaintext, record) = {
+            let mut keys = self.keys.write().expect("key store poisoned");
+            keys.generate(role, label)?
+        };
+        self.record_audit(
+            None,
+            "key.create",
+            &format!("key:{}", record.id),
+            "success",
+            None,
+            0,
+        );
         Ok(plaintext)
     }
 
@@ -167,8 +212,36 @@ impl Api {
 
     /// Revoke a key.
     pub fn revoke_key(&self, id: &str) -> bool {
-        let mut keys = self.keys.write().expect("key store poisoned");
-        keys.revoke(id)
+        let revoked = {
+            let mut keys = self.keys.write().expect("key store poisoned");
+            keys.revoke(id)
+        };
+        self.record_audit(
+            None,
+            "key.revoke",
+            &format!("key:{id}"),
+            if revoked { "success" } else { "failure" },
+            None,
+            0,
+        );
+        revoked
+    }
+
+    /// Change a live key's role.
+    pub fn change_role(&self, id: &str, role: Role) -> bool {
+        let changed = {
+            let mut keys = self.keys.write().expect("key store poisoned");
+            keys.set_role(id, role)
+        };
+        self.record_audit(
+            None,
+            "key.role_change",
+            &format!("key:{id}:{}", role.name()),
+            if changed { "success" } else { "failure" },
+            None,
+            0,
+        );
+        changed
     }
 
     /// Handle a request.
@@ -185,17 +258,65 @@ impl Api {
             .map(|principal| principal.key_id.clone())
             .unwrap_or_else(|| format!("client:{client_id}"));
         let decision = self.limiter.check(&rate_key, now_secs);
+        let actor = principal.as_ref().map(|principal| principal.key_id.clone());
+
+        if !decision.allowed {
+            self.record_audit(
+                actor.clone(),
+                "request.rate_limited",
+                &request.path,
+                "denied",
+                Some(request_id.clone()),
+                now_secs,
+            );
+        }
 
         let mut response = if !decision.allowed {
             error_response(429, "rate_limited", "rate limit exceeded")
         } else if request.method == "OPTIONS" {
             self.preflight(request)
         } else {
-            match self.route(request, principal.as_ref()) {
+            match self.route(request, principal.as_ref(), now_secs, &request_id) {
                 Ok(response) => response,
                 Err(error) => error_response(error.status, &error.code, &error.message),
             }
         };
+        if decision.allowed {
+            let outcome = if response.status < 400 {
+                "success"
+            } else {
+                "failure"
+            };
+            match response.status {
+                401 => self.record_audit(
+                    None,
+                    "auth.failure",
+                    &request.path,
+                    "denied",
+                    Some(request_id.clone()),
+                    now_secs,
+                ),
+                403 => self.record_audit(
+                    actor.clone(),
+                    "auth.forbidden",
+                    &request.path,
+                    "denied",
+                    Some(request_id.clone()),
+                    now_secs,
+                ),
+                _ if request.method == "POST" && request.path.starts_with("/api/v1/contracts/") => {
+                    self.record_audit(
+                        actor.clone(),
+                        "analysis.run",
+                        &request.path,
+                        outcome,
+                        Some(request_id.clone()),
+                        now_secs,
+                    );
+                }
+                _ => {}
+            }
+        }
         let analysis = response.status == 200
             && request.method == "POST"
             && request.path.starts_with("/api/v1/contracts/");
@@ -290,7 +411,10 @@ impl Api {
         &self,
         request: &Request,
         principal: Option<&Principal>,
+        now_secs: u64,
+        request_id: &str,
     ) -> Result<Response, ApiError> {
+        let actor = principal.map(|principal| principal.key_id.clone());
         if request.path == "/api/v1/webhooks" {
             return self.route_webhooks(request, principal);
         }
@@ -394,6 +518,92 @@ impl Api {
                 let wasm = decode_wasm(&body.wasm_base64).map_err(ApiError::from)?;
                 let outcome = self.observatory.security(&wasm).map_err(ApiError::from)?;
                 Ok(response(200, "security", &outcome))
+            }
+            ("POST", "/api/v1/contracts/events") => {
+                self.require(principal, Permission::RunAnalysis)?;
+                let body: EventsRequest = parse_json(request)?;
+                let limit = body.limit.unwrap_or(100);
+                if limit == 0 || limit > MAX_EVENT_RESULTS {
+                    return Err(ApiError::bad_request(format!(
+                        "limit must be between 1 and {MAX_EVENT_RESULTS}"
+                    )));
+                }
+                let events = self
+                    .observatory
+                    .events_filtered(
+                        &body.fixture,
+                        body.contract.as_deref(),
+                        body.topic.as_deref(),
+                        body.event_type.as_deref(),
+                        Some(limit),
+                    )
+                    .map_err(ApiError::from)?;
+                Ok(response(200, "events", &events))
+            }
+            ("POST", "/api/v1/jobs") => {
+                self.require(principal, Permission::RunAnalysis)?;
+                let body: CreateJobRequest = parse_json(request)?;
+                let job = self
+                    .jobs
+                    .write()
+                    .expect("job queue poisoned")
+                    .enqueue(
+                        &body.kind,
+                        body.idempotency_key.as_deref(),
+                        body.max_attempts,
+                        now_secs,
+                    )
+                    .map_err(ApiError::from)?;
+                self.record_audit(
+                    actor.clone(),
+                    "job.create",
+                    &format!("job:{}", job.id),
+                    "success",
+                    Some(request_id.to_string()),
+                    now_secs,
+                );
+                Ok(response(201, "job", &job))
+            }
+            ("GET", "/api/v1/jobs") => {
+                self.require(principal, Permission::RunAnalysis)?;
+                let queue = self.jobs.read().expect("job queue poisoned");
+                if let Some(id) = query_value(request, "id") {
+                    match queue.job(id) {
+                        Some(job) => Ok(response(200, "job", job)),
+                        None => Err(ApiError::new(404, "not_found", "unknown job")),
+                    }
+                } else {
+                    Ok(response(200, "jobs", &queue.jobs()))
+                }
+            }
+            ("POST", "/api/v1/jobs/cancel") => {
+                self.require(principal, Permission::RunAnalysis)?;
+                let body: CancelJobRequest = parse_json(request)?;
+                let cancelled = self
+                    .jobs
+                    .write()
+                    .expect("job queue poisoned")
+                    .cancel(&body.id, now_secs);
+                if !cancelled {
+                    return Err(ApiError::bad_request("job is not queued or does not exist"));
+                }
+                self.record_audit(
+                    actor.clone(),
+                    "job.cancel",
+                    &format!("job:{}", body.id),
+                    "success",
+                    Some(request_id.to_string()),
+                    now_secs,
+                );
+                Ok(response(
+                    200,
+                    "job_cancelled",
+                    &serde_json::json!({ "id": body.id, "cancelled": true }),
+                ))
+            }
+            ("GET", "/api/v1/audit/events") => {
+                self.require(principal, Permission::ManageKeys)?;
+                Ok(response(200, "audit", &self.audit_events()))
             }
             _ => {
                 // Distinguish a known path with the wrong method from an unknown path.
@@ -516,6 +726,17 @@ fn parse_webhook_events(values: &[String]) -> Result<Vec<WebhookEvent>, ApiError
         .iter()
         .map(|value| WebhookEvent::parse(value).map_err(ApiError::from))
         .collect()
+}
+
+fn query_value<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    request
+        .query
+        .as_deref()?
+        .split('&')
+        .find_map(|pair| match pair.split_once('=') {
+            Some((key, value)) if key == name => Some(value),
+            _ => None,
+        })
 }
 
 fn wants_json(request: &Request) -> bool {
@@ -833,6 +1054,184 @@ mod tests {
         let text = String::from_utf8(api.handle(&get(METRICS_PATH), "ip", 0).body).unwrap();
         assert!(!text.contains(&key));
         assert!(!text.contains("sco_"));
+    }
+
+    fn get_query(path: &str, query: &str) -> Request {
+        Request {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            query: Some(query.to_string()),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    fn events_fixture() -> Value {
+        serde_json::json!({
+            "events": [
+                { "contractId": "CAAA", "type": "contract", "topics": [], "data": null },
+                { "type": "system", "topics": [], "data": null },
+                { "contractId": "CBBB", "type": "contract", "topics": [], "data": null }
+            ]
+        })
+    }
+
+    #[test]
+    fn events_endpoint_filters_and_bounds_results() {
+        let (api, key) = api_with_developer();
+        let request = with_key(
+            post(
+                "/api/v1/contracts/events",
+                serde_json::json!({ "fixture": events_fixture() }),
+            ),
+            &key,
+        );
+        let response = api.handle(&request, "ip", 0);
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["data"].as_array().unwrap().len(), 3);
+
+        let filtered = with_key(
+            post(
+                "/api/v1/contracts/events",
+                serde_json::json!({ "fixture": events_fixture(), "type": "system" }),
+            ),
+            &key,
+        );
+        let body: Value = serde_json::from_slice(&api.handle(&filtered, "ip", 0).body).unwrap();
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+        let limited = with_key(
+            post(
+                "/api/v1/contracts/events",
+                serde_json::json!({ "fixture": events_fixture(), "limit": 2 }),
+            ),
+            &key,
+        );
+        let body: Value = serde_json::from_slice(&api.handle(&limited, "ip", 0).body).unwrap();
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn events_endpoint_rejects_malformed_fixtures_and_limits() {
+        let (api, key) = api_with_developer();
+        for body in [
+            serde_json::json!({ "fixture": { "foo": 1 } }),
+            serde_json::json!({ "fixture": [], "limit": 0 }),
+            serde_json::json!({ "fixture": [], "limit": 5000 }),
+        ] {
+            let request = with_key(post("/api/v1/contracts/events", body), &key);
+            assert_eq!(api.handle(&request, "ip", 0).status, 400);
+        }
+    }
+
+    #[test]
+    fn jobs_are_idempotent_observable_and_cancellable() {
+        let (api, key) = api_with_developer();
+        let body = serde_json::json!({ "kind": "analysis", "idempotency_key": "k1" });
+        let first = api.handle(&with_key(post("/api/v1/jobs", body.clone()), &key), "ip", 1);
+        assert_eq!(first.status, 201);
+        let first_body: Value = serde_json::from_slice(&first.body).unwrap();
+        let id = first_body["data"]["id"].as_str().unwrap().to_string();
+
+        let second = api.handle(&with_key(post("/api/v1/jobs", body), &key), "ip", 2);
+        assert_eq!(second.status, 201);
+        let second_body: Value = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(second_body["data"]["id"], id);
+
+        let status = api.handle(
+            &with_key(get_query("/api/v1/jobs", &format!("id={id}")), &key),
+            "ip",
+            3,
+        );
+        assert_eq!(status.status, 200);
+        let status_body: Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status_body["data"]["state"], "queued");
+
+        let cancel = api.handle(
+            &with_key(
+                post("/api/v1/jobs/cancel", serde_json::json!({ "id": id })),
+                &key,
+            ),
+            "ip",
+            4,
+        );
+        assert_eq!(cancel.status, 200);
+        let cancelled = api.handle(
+            &with_key(get_query("/api/v1/jobs", &format!("id={id}")), &key),
+            "ip",
+            5,
+        );
+        let cancelled_body: Value = serde_json::from_slice(&cancelled.body).unwrap();
+        assert_eq!(cancelled_body["data"]["state"], "cancelled");
+        assert_eq!(
+            api.handle(
+                &with_key(
+                    post("/api/v1/jobs/cancel", serde_json::json!({ "id": id })),
+                    &key,
+                ),
+                "ip",
+                6,
+            )
+            .status,
+            400
+        );
+    }
+
+    #[test]
+    fn audit_log_records_privileged_actions_without_secrets() {
+        let api = Api::new(PlatformConfig::default());
+        let admin = api.generate_key(Role::Admin, "admin").unwrap();
+        let serialized = serde_json::to_string(&api.audit_events()).unwrap();
+        assert!(serialized.contains("key.create"));
+        assert!(!serialized.contains(&admin));
+        assert!(!serialized.contains("sco_"));
+
+        let inspect = with_key(
+            post(
+                "/api/v1/contracts/inspect",
+                serde_json::json!({ "wasm_base64": contract() }),
+            ),
+            &admin,
+        );
+        assert_eq!(api.handle(&inspect, "ip", 1).status, 200);
+        assert_eq!(
+            api.handle(&inspect, "ip", 2).status,
+            200,
+            "rate limit has room"
+        );
+        assert!(api
+            .audit_events()
+            .iter()
+            .any(|e| e.action == "analysis.run"));
+        assert_eq!(
+            api.handle(
+                &post(
+                    "/api/v1/contracts/inspect",
+                    serde_json::json!({ "wasm_base64": contract() }),
+                ),
+                "ip",
+                3,
+            )
+            .status,
+            401
+        );
+        assert!(api
+            .audit_events()
+            .iter()
+            .any(|e| e.action == "auth.failure"));
+
+        let developer = api.generate_key(Role::Developer, "dev").unwrap();
+        assert_eq!(
+            api.handle(&with_key(get("/api/v1/audit/events"), &developer), "ip", 4,)
+                .status,
+            403
+        );
+        assert_eq!(
+            api.handle(&with_key(get("/api/v1/audit/events"), &admin), "ip", 5)
+                .status,
+            200
+        );
     }
 
     fn maintainer_api() -> (Api, String) {

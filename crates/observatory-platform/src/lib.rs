@@ -8,8 +8,10 @@
 //! Keeping these concerns out of the intelligence crates preserves the
 //! dependency direction: the platform depends on the engine, never the reverse.
 
+pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod jobs;
 pub mod policy;
 pub mod project;
 pub mod ratelimit;
@@ -17,8 +19,10 @@ pub mod rbac;
 pub mod service;
 pub mod webhook;
 
+pub use audit::{AuditEvent, AuditLog};
 pub use auth::{ApiKeyRecord, ApiKeyStore, Principal};
 pub use config::{CorsConfig, PlatformConfig};
+pub use jobs::{Job, JobQueue, JobState};
 pub use observatory_compat::CompatibilityPolicy;
 pub use policy::{load_policy, parse_policy};
 pub use project::{ConfigFormat, ProjectConfig};

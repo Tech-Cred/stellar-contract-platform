@@ -6,6 +6,7 @@
 use observatory_core::limits::MAX_WASM_BYTES;
 use observatory_core::{ObservatoryError, Result};
 use serde::Deserialize;
+use serde_json::Value;
 
 use base64::Engine as _;
 
@@ -53,6 +54,49 @@ pub struct CompatibilityRequest {
 
 fn default_policy() -> String {
     "strict".to_string()
+}
+
+/// Request body for the fixture-backed events endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsRequest {
+    /// Event fixture: an array, an object with an `events` array, a single raw
+    /// event object, or a base64 `ContractEvent`.
+    pub fixture: Value,
+    /// Only keep events for this contract id.
+    #[serde(default)]
+    pub contract: Option<String>,
+    /// Only keep events whose topic matches this text.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Only keep events of this type (`system`, `contract`, `diagnostic`).
+    #[serde(default, rename = "type")]
+    pub event_type: Option<String>,
+    /// Maximum number of events to return.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Request body for enqueuing a background job.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateJobRequest {
+    /// Caller-defined job kind.
+    pub kind: String,
+    /// Optional idempotency key; repeating it returns the existing job.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    /// Attempt budget (1-10).
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+}
+
+/// Request body for cancelling a job.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelJobRequest {
+    /// Job id to cancel.
+    pub id: String,
 }
 
 /// Request body for creating a webhook subscription.

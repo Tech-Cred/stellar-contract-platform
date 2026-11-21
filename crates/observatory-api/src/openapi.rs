@@ -66,6 +66,108 @@ pub fn document() -> Value {
                         "version": { "type": "string" },
                         "data": { "type": "object" }
                     }
+                },
+                "InspectRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["wasm_base64"],
+                    "properties": {
+                        "wasm_base64": { "type": "string" },
+                        "security": { "type": "boolean", "default": false }
+                    }
+                },
+                "WasmRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["wasm_base64"],
+                    "properties": { "wasm_base64": { "type": "string" } }
+                },
+                "DiffRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["old_wasm_base64", "new_wasm_base64"],
+                    "properties": {
+                        "old_wasm_base64": { "type": "string" },
+                        "new_wasm_base64": { "type": "string" }
+                    }
+                },
+                "CompatibilityRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["old_wasm_base64", "new_wasm_base64"],
+                    "properties": {
+                        "old_wasm_base64": { "type": "string" },
+                        "new_wasm_base64": { "type": "string" },
+                        "policy": {
+                            "type": "string",
+                            "enum": ["strict", "lenient"],
+                            "default": "strict"
+                        }
+                    }
+                },
+                "EventsRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["fixture"],
+                    "properties": {
+                        "fixture": {
+                            "oneOf": [{ "type": "array" }, { "type": "object" }, { "type": "string" }]
+                        },
+                        "contract": { "type": ["string", "null"] },
+                        "topic": { "type": ["string", "null"] },
+                        "type": { "type": ["string", "null"] },
+                        "limit": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "maximum": 1000
+                        }
+                    }
+                },
+                "CreateJobRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": { "type": "string", "maxLength": 64 },
+                        "idempotency_key": { "type": ["string", "null"] },
+                        "max_attempts": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "maximum": 10
+                        }
+                    }
+                },
+                "CancelJobRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id"],
+                    "properties": { "id": { "type": "string" } }
+                },
+                "CreateWebhookRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["url", "events"],
+                    "properties": {
+                        "url": { "type": "string" },
+                        "events": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": { "type": "string" }
+                        }
+                    }
+                },
+                "UpdateWebhookRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "url": { "type": ["string", "null"] },
+                        "events": {
+                            "type": ["array", "null"],
+                            "minItems": 1,
+                            "items": { "type": "string" }
+                        },
+                        "active": { "type": ["boolean", "null"] }
+                    }
                 }
             },
             "responses": {
@@ -130,16 +232,33 @@ fn operation_for(method: &str, path: &str) -> Value {
         }]);
     }
     if method == "POST" || method == "PATCH" {
+        let schema = match request_schema_for(path) {
+            Some(name) => json!({ "$ref": format!("#/components/schemas/{name}") }),
+            None => json!({ "type": "object", "additionalProperties": true }),
+        };
         operation["requestBody"] = json!({
             "required": true,
-            "content": {
-                "application/json": {
-                    "schema": { "type": "object", "additionalProperties": true }
-                }
-            }
+            "content": { "application/json": { "schema": schema } }
         });
     }
     operation
+}
+
+fn request_schema_for(path: &str) -> Option<&'static str> {
+    match path {
+        "/api/v1/contracts/inspect" => Some("InspectRequest"),
+        "/api/v1/contracts/spec" => Some("WasmRequest"),
+        "/api/v1/contracts/fingerprint" => Some("WasmRequest"),
+        "/api/v1/contracts/security" => Some("WasmRequest"),
+        "/api/v1/contracts/diff" => Some("DiffRequest"),
+        "/api/v1/contracts/compatibility" => Some("CompatibilityRequest"),
+        "/api/v1/contracts/events" => Some("EventsRequest"),
+        "/api/v1/jobs" => Some("CreateJobRequest"),
+        "/api/v1/jobs/cancel" => Some("CancelJobRequest"),
+        "/api/v1/webhooks" => Some("CreateWebhookRequest"),
+        "/api/v1/webhooks/{id}" => Some("UpdateWebhookRequest"),
+        _ => None,
+    }
 }
 
 fn operation_id(method: &str, path: &str) -> String {
@@ -170,6 +289,10 @@ fn summary_for(path: &str) -> &'static str {
         "/api/v1/contracts/compatibility" => "Assess interface compatibility",
         "/api/v1/contracts/fingerprint" => "Compute fingerprints",
         "/api/v1/contracts/security" => "Run security heuristics",
+        "/api/v1/contracts/events" => "Query contract events from a fixture",
+        "/api/v1/jobs" => "List, create, or read background jobs",
+        "/api/v1/jobs/cancel" => "Cancel a queued job",
+        "/api/v1/audit/events" => "Read the structured audit log",
         "/api/v1/webhooks" => "List or create webhook subscriptions",
         "/api/v1/webhooks/{id}" => "Read, update, or delete a webhook subscription",
         _ => "Operation",
@@ -207,6 +330,54 @@ mod tests {
         assert!(inspect.get("security").is_some());
         let health = &document["paths"]["/api/v1/health"]["get"];
         assert!(health.get("security").is_none());
+    }
+
+    #[test]
+    fn post_routes_publish_concrete_request_schemas() {
+        let document = document();
+        for (method, path) in ROUTES {
+            if *method != "POST" {
+                continue;
+            }
+            let schema = &document["paths"][*path]["post"]["requestBody"]["content"]
+                ["application/json"]["schema"];
+            let reference = schema["$ref"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{path} has no concrete request schema: {schema}"));
+            let name = reference
+                .strip_prefix("#/components/schemas/")
+                .expect("request schema reference");
+            let component = &document["components"]["schemas"][name];
+            assert_eq!(
+                component["additionalProperties"],
+                json!(false),
+                "{name} must be closed to unknown fields"
+            );
+            assert!(
+                component["required"]
+                    .as_array()
+                    .is_some_and(|r| !r.is_empty()),
+                "{name} must declare required fields"
+            );
+        }
+    }
+
+    #[test]
+    fn request_schemas_require_their_inputs() {
+        let document = document();
+        let inspect = &document["components"]["schemas"]["InspectRequest"];
+        let required: Vec<&str> = inspect["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(required, vec!["wasm_base64"]);
+        let compatibility = &document["components"]["schemas"]["CompatibilityRequest"];
+        assert_eq!(
+            compatibility["properties"]["policy"]["enum"],
+            json!(["strict", "lenient"])
+        );
     }
 
     #[test]
