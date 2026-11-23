@@ -342,6 +342,36 @@ fn events_filters_fixture() {
 }
 
 #[test]
+fn events_emit_deterministic_csv_with_escaping() {
+    use stellar_xdr::{Limits, ScSymbol, StringM, WriteXdr};
+    let topic = stellar_xdr::ScVal::Symbol(ScSymbol(StringM::try_from("transfer").unwrap()))
+        .to_xdr_base64(Limits::none())
+        .unwrap();
+    let fixture = format!(
+        r#"{{"events":[{{"contractId":"CAAA","ledger":42,"txHash":"abc,123","type":"contract","topics":["{topic}"],"data":null}}]}}"#
+    );
+    let file = write_temp(fixture.as_bytes(), ".json");
+    binary()
+        .args(["events", file.path().to_str().unwrap(), "--format", "csv"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(
+            "contract_id,ledger,tx_hash,event_type,topics,data\n",
+        ))
+        .stdout(predicate::str::contains(r#"CAAA,42,"abc,123",contract,"#))
+        .stdout(predicate::str::contains(r#""""void""""#));
+}
+
+#[test]
+fn csv_is_rejected_for_non_event_commands() {
+    binary()
+        .args(["doctor", "--format", "csv"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("events"));
+}
+
+#[test]
 fn completions_emit_non_empty_scripts() {
     for shell in ["bash", "zsh", "fish", "powershell"] {
         binary()

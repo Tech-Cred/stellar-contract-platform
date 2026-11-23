@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Events CLI: `events --format csv` emits deterministic, correctly escaped
+  tabular output with a fixed documented header (#87).
+
 - Events: `RpcClient::get_events` reads a bounded `getEvents` page, and
   `observatory-events` normalizes RPC events (`topic`/`value` ScVals) into
   `EventRecord`. `events --rpc-fixture` paginates a mock response offline (#36).

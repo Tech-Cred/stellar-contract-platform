@@ -45,7 +45,12 @@ rendered for functions and types, and for the type and per-field/case members
 printed by `--type`. Documentation is omitted when empty; nothing is invented.
 The `--json` output is unchanged.
 
-### `events [<FILE>] [--rpc-fixture <FILE>] [--contract <ID>] [--topic <TEXT>] [--type <TYPE>] [--limit <N>]`
+### `events [<FILE>] [--rpc-fixture <FILE>] [--contract <ID>] [--topic <TEXT>] [--type <TYPE>] [--limit <N>] [--format csv]`
+
+`--format csv` emits a deterministic fixed header:
+`contract_id,ledger,tx_hash,event_type,topics,data`. The `topics` cell contains
+a JSON array; commas, quotes, and line breaks are escaped according to CSV
+rules. JSON and human-readable output are unchanged.
 
 Decodes an event fixture and filters it. `--limit` is applied last.
 

@@ -13,6 +13,8 @@ pub enum OutputFormat {
     Human,
     /// Stable, machine-readable JSON.
     Json,
+    /// Comma-separated values (supported by selected reports).
+    Csv,
 }
 
 impl FromStr for OutputFormat {
@@ -22,8 +24,9 @@ impl FromStr for OutputFormat {
         match value.trim().to_ascii_lowercase().as_str() {
             "human" | "text" => Ok(OutputFormat::Human),
             "json" => Ok(OutputFormat::Json),
+            "csv" => Ok(OutputFormat::Csv),
             other => Err(ObservatoryError::invalid(format!(
-                "unknown output format `{other}`; expected human or json"
+                "unknown output format `{other}`; expected human, json, or csv"
             ))),
         }
     }
@@ -34,6 +37,7 @@ impl fmt::Display for OutputFormat {
         f.write_str(match self {
             OutputFormat::Human => "human",
             OutputFormat::Json => "json",
+            OutputFormat::Csv => "csv",
         })
     }
 }
@@ -45,6 +49,7 @@ mod tests {
     #[test]
     fn parses_formats() {
         assert_eq!("json".parse::<OutputFormat>().unwrap(), OutputFormat::Json);
+        assert_eq!("csv".parse::<OutputFormat>().unwrap(), OutputFormat::Csv);
         assert_eq!("TEXT".parse::<OutputFormat>().unwrap(), OutputFormat::Human);
         assert!("xml".parse::<OutputFormat>().is_err());
     }
