@@ -25,6 +25,13 @@ use serde::{Deserialize, Serialize};
 /// Version of the canonical interface representation.
 pub const INTERFACE_SCHEMA_VERSION: &str = "1.0";
 
+/// Canonical input for an event-interface fingerprint.
+#[derive(Serialize)]
+struct EventInterface<'a> {
+    schema_version: &'a str,
+    events: &'a [SpecEvent],
+}
+
 /// A canonical, order-independent view of a contract's public interface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractInterface {
@@ -206,6 +213,22 @@ impl ContractInterface {
         Ok(sha256_hex(&self.canonical_json()?))
     }
 
+    /// The deterministic SHA-256 fingerprint of the declared event interface.
+    ///
+    /// The fingerprint covers the schema version and canonical event
+    /// declarations only. Functions, user-defined types, implementation details,
+    /// and event instances emitted at runtime are intentionally excluded.
+    pub fn event_fingerprint(&self) -> Result<String> {
+        let event_interface = EventInterface {
+            schema_version: &self.schema_version,
+            events: &self.events,
+        };
+        let canonical_json = serde_json::to_vec(&event_interface).map_err(|error| {
+            ObservatoryError::internal(format!("event interface serialization: {error}"))
+        })?;
+        Ok(sha256_hex(&canonical_json))
+    }
+
     /// Reconstruct a normalized specification for validation or summarization.
     #[must_use]
     pub fn to_spec(&self) -> ContractSpec {
@@ -282,8 +305,8 @@ pub fn type_references_udt(ty: &SpecType) -> bool {
 mod tests {
     use super::*;
     use observatory_spec::normalize;
-    use observatory_testutil::spec::{spec_enum, spec_function, spec_struct, ty_udt};
-    use stellar_xdr::{ScSpecEntry, ScSpecTypeDef};
+    use observatory_testutil::spec::{spec_enum, spec_event, spec_function, spec_struct, ty_udt};
+    use stellar_xdr::{ScSpecEntry, ScSpecEventParamLocationV0, ScSpecTypeDef};
 
     fn spec(entries: Vec<ScSpecEntry>) -> ContractSpec {
         normalize(entries)
@@ -332,6 +355,77 @@ mod tests {
             None,
         )]));
         assert_ne!(a.fingerprint().unwrap(), b.fingerprint().unwrap());
+    }
+
+    #[test]
+    fn event_fingerprint_is_order_independent_and_event_only() {
+        let event_a = spec_event(
+            "a",
+            &["a"],
+            &[(
+                "amount",
+                ScSpecTypeDef::I128,
+                ScSpecEventParamLocationV0::Data,
+            )],
+        );
+        let event_b = spec_event("b", &["b"], &[]);
+        let a = ContractInterface::from_spec(spec(vec![
+            event_b.clone(),
+            spec_function("ignored", &[], None),
+            event_a.clone(),
+        ]));
+        let b = ContractInterface::from_spec(spec(vec![event_a, event_b]));
+
+        assert_eq!(
+            a.event_fingerprint().unwrap(),
+            b.event_fingerprint().unwrap()
+        );
+    }
+
+    #[test]
+    fn event_fingerprint_changes_with_event_shape() {
+        let a = ContractInterface::from_spec(spec(vec![spec_event(
+            "transfer",
+            &["transfer"],
+            &[(
+                "amount",
+                ScSpecTypeDef::I128,
+                ScSpecEventParamLocationV0::Data,
+            )],
+        )]));
+        let b = ContractInterface::from_spec(spec(vec![spec_event(
+            "transfer",
+            &["transfer"],
+            &[(
+                "amount",
+                ScSpecTypeDef::U64,
+                ScSpecEventParamLocationV0::Data,
+            )],
+        )]));
+
+        assert_ne!(
+            a.event_fingerprint().unwrap(),
+            b.event_fingerprint().unwrap()
+        );
+    }
+
+    #[test]
+    fn known_event_fingerprint_vector() {
+        let interface = ContractInterface::from_spec(spec(vec![spec_event(
+            "transfer",
+            &["transfer", "v1"],
+            &[(
+                "amount",
+                ScSpecTypeDef::I128,
+                ScSpecEventParamLocationV0::Data,
+            )],
+        )]));
+
+        assert_eq!(
+            interface.event_fingerprint().unwrap(),
+            "3f1ba106cadee85908849aa5c2d8433041822410e594100bb5ef745b8fbfb414",
+            "event fingerprint serialization changed"
+        );
     }
 
     #[test]

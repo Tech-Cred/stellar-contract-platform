@@ -8,6 +8,7 @@ Fingerprints provide stable identity for artifacts and interfaces.
 | ----------- | ------ | -------------- |
 | Artifact SHA-256 | The exact WASM bytes | Interface meaning, source |
 | Interface SHA-256 | The canonical interface (functions, types, events) | Implementation, metadata |
+| Event-interface SHA-256 | Canonical declared events | Functions, types, emitted event instances, implementation |
 
 ## Artifact fingerprint
 
@@ -41,6 +42,16 @@ They exist to catch an accidental change to the canonical JSON encoding (field
 names, field order, type tags). Changing a digest therefore requires a
 deliberate decision that the wire format has changed; it must never be updated
 merely to make a test pass.
+
+## Event-interface fingerprint
+
+`ContractInterface::event_fingerprint` hashes the interface schema version and
+the canonical list of declared contract events. Event declarations are sorted
+by name, while the order of each event's prefix topics and parameters remains
+semantic. Non-event declarations do not affect this fingerprint.
+
+This fingerprint describes the events a contract declares in its specification.
+It does not include, inspect, or attest to event instances emitted at runtime.
 
 ## Warning
 

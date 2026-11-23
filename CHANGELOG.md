@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Interface: `ContractInterface::event_fingerprint` provides a deterministic,
+  order-independent SHA-256 fingerprint of declared events only, excluding
+  functions, types, implementation details, and emitted event instances (#83).
+
 - Events: `RpcClient::get_events` reads a bounded `getEvents` page, and
   `observatory-events` normalizes RPC events (`topic`/`value` ScVals) into
   `EventRecord`. `events --rpc-fixture` paginates a mock response offline (#36).
