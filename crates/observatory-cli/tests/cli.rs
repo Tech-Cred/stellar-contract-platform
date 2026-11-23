@@ -93,6 +93,50 @@ fn inspect_security_emits_audit() {
 }
 
 #[test]
+fn inspect_security_applies_a_baseline_suppression() {
+    let wasm = module_with_spec(&contract_entries());
+    let file = write_temp(&wasm, ".wasm");
+    let baseline = write_temp(
+        b"suppressions:\n  - rule: artifact.no-code\n    reason: generated artifact\n",
+        ".yml",
+    );
+    binary()
+        .args([
+            "inspect",
+            file.path().to_str().unwrap(),
+            "--security",
+            "--baseline",
+            baseline.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"suppressed\": 1"))
+        .stdout(predicate::str::contains("\"findings\": []"));
+}
+
+#[test]
+fn inspect_security_rejects_an_invalid_baseline() {
+    let wasm = module_with_spec(&contract_entries());
+    let file = write_temp(&wasm, ".wasm");
+    let baseline = write_temp(
+        b"{\"suppressions\":[{\"rule\":\"artifact.nope\",\"reason\":\"x\"}]}",
+        ".json",
+    );
+    binary()
+        .args([
+            "inspect",
+            file.path().to_str().unwrap(),
+            "--security",
+            "--baseline",
+            baseline.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown audit rule id"));
+}
+
+#[test]
 fn spec_lists_functions() {
     let file = write_temp(&module_with_spec(&contract_entries()), ".wasm");
     binary()

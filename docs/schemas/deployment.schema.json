@@ -19,7 +19,26 @@
         "wasm_hash": { "type": ["string", "null"] },
         "last_modified_ledger_seq": { "type": ["integer", "null"], "minimum": 0 },
         "live_until_ledger_seq": { "type": ["integer", "null"], "minimum": 0 },
-        "found": { "type": "boolean" }
+        "found": { "type": "boolean" },
+        "storage": {
+          "type": ["object", "null"],
+          "description": "Bounded summary of the instance storage map. Keys and values are never included.",
+          "additionalProperties": false,
+          "required": ["entry_count", "inspected_entries", "truncated", "key_types", "value_types"],
+          "properties": {
+            "entry_count": { "type": "integer", "minimum": 0 },
+            "inspected_entries": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" },
+            "key_types": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            },
+            "value_types": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
       }
     }
   }

@@ -1133,9 +1133,11 @@ dependencies = [
  "predicates",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "stellar-strkey 0.0.18",
  "stellar-xdr",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

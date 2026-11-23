@@ -59,6 +59,149 @@ pub struct AuditReport {
     pub status: AuditStatus,
     /// Findings, deterministically ordered by id then path.
     pub findings: Vec<Finding>,
+    /// Findings hidden by a baseline suppression, counted separately.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub suppressed: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// A baseline suppression file.
+///
+/// Suppressions are keyed by rule id and, optionally, a finding path. A
+/// suppression without a path matches every finding with that rule id. Every
+/// suppression states a reason so CI history explains why it exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SuppressionFile {
+    /// The suppressions, in file order.
+    #[serde(default)]
+    pub suppressions: Vec<Suppression>,
+}
+
+/// One baseline suppression.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Suppression {
+    /// The rule id to hide, for example `artifact.no-code`.
+    pub rule: String,
+    /// Exact finding path to hide; absent hides the rule at every path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Why the finding is accepted. Required and non-empty.
+    pub reason: String,
+    /// Last day the suppression applies (`YYYY-MM-DD`, inclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+}
+
+impl SuppressionFile {
+    /// Validate every suppression against the rule registry and its fields.
+    ///
+    /// `today` is an ISO `YYYY-MM-DD` date used only to check expiry syntax;
+    /// expired suppressions are inactive, not errors.
+    pub fn validate(&self, today: &str) -> Result<()> {
+        validate_date(today)?;
+        for suppression in &self.suppressions {
+            validate_rule_id(&suppression.rule)?;
+            if suppression.reason.trim().is_empty() {
+                return Err(ObservatoryError::invalid(format!(
+                    "suppression for rule `{}` must state a reason",
+                    suppression.rule
+                )));
+            }
+            if suppression
+                .path
+                .as_deref()
+                .is_some_and(|path| path.trim().is_empty())
+            {
+                return Err(ObservatoryError::invalid(format!(
+                    "suppression for rule `{}` has an empty path",
+                    suppression.rule
+                )));
+            }
+            if let Some(expires) = &suppression.expires {
+                validate_date(expires).map_err(|_| {
+                    ObservatoryError::invalid(format!(
+                        "suppression for rule `{}` has invalid expiry `{expires}`; expected YYYY-MM-DD",
+                        suppression.rule
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn matches(&self, finding: &Finding, today: &str) -> bool {
+        self.suppressions.iter().any(|suppression| {
+            suppression.rule == finding.id
+                && suppression
+                    .path
+                    .as_ref()
+                    .is_none_or(|path| finding.path.as_ref() == Some(path))
+                && !suppression
+                    .expires
+                    .as_deref()
+                    .is_some_and(|expires| expires < today)
+        })
+    }
+}
+
+/// Today's UTC date as `YYYY-MM-DD`, without a calendar dependency.
+#[must_use]
+pub fn current_utc_date() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    iso_date_from_days((seconds / 86_400) as i64)
+}
+
+fn iso_date_from_days(days: i64) -> String {
+    // Civil-from-days (Howard Hinnant), proleptic Gregorian calendar.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn validate_date(value: &str) -> Result<()> {
+    let invalid =
+        || ObservatoryError::invalid(format!("invalid date `{value}`; expected YYYY-MM-DD"));
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let year: i64 = value[0..4].parse().map_err(|_| invalid())?;
+    let month: u32 = value[5..7].parse().map_err(|_| invalid())?;
+    let day: u32 = value[8..10].parse().map_err(|_| invalid())?;
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(invalid()),
+    };
+    if !(1..=maximum_day).contains(&day) {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Every rule id this crate can emit.
@@ -189,7 +332,11 @@ impl AuditReport {
         } else {
             AuditStatus::Warn
         };
-        AuditReport { status, findings }
+        AuditReport {
+            status,
+            findings,
+            suppressed: 0,
+        }
     }
 
     /// Merge two reports into one.
@@ -197,7 +344,9 @@ impl AuditReport {
     pub fn merge(self, other: AuditReport) -> AuditReport {
         let mut findings = self.findings;
         findings.extend(other.findings);
-        AuditReport::from_findings(findings)
+        let mut report = AuditReport::from_findings(findings);
+        report.suppressed = self.suppressed + other.suppressed;
+        report
     }
 
     /// Count findings of a severity.
@@ -207,6 +356,32 @@ impl AuditReport {
             .iter()
             .filter(|finding| finding.severity == severity)
             .count()
+    }
+
+    /// Hide findings matched by `baseline`, counting them in
+    /// [`AuditReport::suppressed`].
+    ///
+    /// The status is recomputed from the remaining findings, so hiding the only
+    /// error can turn the report into a pass. The baseline is validated first;
+    /// an unknown rule id, a missing reason, or a malformed expiry is an error.
+    pub fn apply_suppressions(
+        self,
+        baseline: &SuppressionFile,
+        today: &str,
+    ) -> Result<AuditReport> {
+        baseline.validate(today)?;
+        let mut findings = Vec::with_capacity(self.findings.len());
+        let mut suppressed = self.suppressed;
+        for finding in self.findings {
+            if baseline.matches(&finding, today) {
+                suppressed += 1;
+            } else {
+                findings.push(finding);
+            }
+        }
+        let mut report = AuditReport::from_findings(findings);
+        report.suppressed = suppressed;
+        Ok(report)
     }
 }
 
@@ -985,6 +1160,199 @@ mod tests {
         let first = a.clone().merge(b.clone());
         let second = a.merge(b);
         assert_eq!(first, second);
+    }
+
+    fn finding(id: &str, path: Option<&str>, severity: FindingSeverity) -> Finding {
+        Finding {
+            id: id.to_string(),
+            severity,
+            message: "test finding".to_string(),
+            path: path.map(str::to_string),
+            experimental: false,
+        }
+    }
+
+    fn suppression(
+        rule: &str,
+        path: Option<&str>,
+        reason: &str,
+        expires: Option<&str>,
+    ) -> Suppression {
+        Suppression {
+            rule: rule.to_string(),
+            path: path.map(str::to_string),
+            reason: reason.to_string(),
+            expires: expires.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn suppressions_hide_findings_and_count_them_separately() {
+        let report = AuditReport::from_findings(vec![
+            finding("spec.error", None, FindingSeverity::Error),
+            finding("artifact.no-code", None, FindingSeverity::Warn),
+        ]);
+        let baseline = SuppressionFile {
+            suppressions: vec![suppression("spec.error", None, "accepted upstream", None)],
+        };
+
+        let suppressed = report.apply_suppressions(&baseline, "2026-01-01").unwrap();
+
+        assert_eq!(suppressed.findings.len(), 1);
+        assert_eq!(suppressed.findings[0].id, "artifact.no-code");
+        assert_eq!(suppressed.suppressed, 1);
+        assert_eq!(suppressed.status, AuditStatus::Warn);
+    }
+
+    #[test]
+    fn suppressing_the_only_error_recomputes_the_status() {
+        let report =
+            AuditReport::from_findings(vec![finding("spec.error", None, FindingSeverity::Error)]);
+        let baseline = SuppressionFile {
+            suppressions: vec![suppression(
+                "spec.error",
+                None,
+                "known false positive",
+                None,
+            )],
+        };
+        let suppressed = report.apply_suppressions(&baseline, "2026-01-01").unwrap();
+        assert!(suppressed.findings.is_empty());
+        assert_eq!(suppressed.status, AuditStatus::Pass);
+        assert_eq!(suppressed.suppressed, 1);
+    }
+
+    #[test]
+    fn a_path_suppression_only_matches_that_path() {
+        let report = AuditReport::from_findings(vec![
+            finding(
+                "function.empty-name",
+                Some("function::a"),
+                FindingSeverity::Error,
+            ),
+            finding(
+                "function.empty-name",
+                Some("function::b"),
+                FindingSeverity::Error,
+            ),
+        ]);
+        let baseline = SuppressionFile {
+            suppressions: vec![suppression(
+                "function.empty-name",
+                Some("function::a"),
+                "generated stub",
+                None,
+            )],
+        };
+        let suppressed = report.apply_suppressions(&baseline, "2026-01-01").unwrap();
+        assert_eq!(suppressed.findings.len(), 1);
+        assert_eq!(suppressed.findings[0].path.as_deref(), Some("function::b"));
+        assert_eq!(suppressed.suppressed, 1);
+    }
+
+    #[test]
+    fn expired_suppressions_are_inactive() {
+        let report = AuditReport::from_findings(vec![finding(
+            "artifact.no-code",
+            None,
+            FindingSeverity::Warn,
+        )]);
+        let baseline = SuppressionFile {
+            suppressions: vec![suppression(
+                "artifact.no-code",
+                None,
+                "temporary waiver",
+                Some("2025-12-31"),
+            )],
+        };
+
+        let expired = report
+            .clone()
+            .apply_suppressions(&baseline, "2026-01-01")
+            .unwrap();
+        assert_eq!(expired.findings.len(), 1);
+        assert_eq!(expired.suppressed, 0);
+
+        let last_day = report.apply_suppressions(&baseline, "2025-12-31").unwrap();
+        assert!(last_day.findings.is_empty());
+        assert_eq!(last_day.suppressed, 1);
+    }
+
+    #[test]
+    fn invalid_suppression_files_are_rejected() {
+        let report = AuditReport::from_findings(vec![finding(
+            "artifact.no-code",
+            None,
+            FindingSeverity::Warn,
+        )]);
+
+        for (baseline, needle) in [
+            (
+                SuppressionFile {
+                    suppressions: vec![suppression("artifact.nope", None, "reason", None)],
+                },
+                "unknown audit rule id `artifact.nope`",
+            ),
+            (
+                SuppressionFile {
+                    suppressions: vec![suppression("artifact.no-code", None, "  ", None)],
+                },
+                "must state a reason",
+            ),
+            (
+                SuppressionFile {
+                    suppressions: vec![suppression(
+                        "artifact.no-code",
+                        None,
+                        "reason",
+                        Some("2026-13-01"),
+                    )],
+                },
+                "invalid expiry",
+            ),
+            (
+                SuppressionFile {
+                    suppressions: vec![suppression("artifact.no-code", Some(" "), "reason", None)],
+                },
+                "empty path",
+            ),
+        ] {
+            let error = report
+                .clone()
+                .apply_suppressions(&baseline, "2026-01-01")
+                .unwrap_err();
+            assert!(error.to_string().contains(needle), "{error}");
+        }
+    }
+
+    #[test]
+    fn merge_sums_suppressed_counts() {
+        let baseline = SuppressionFile {
+            suppressions: vec![suppression("artifact.no-code", None, "reason", None)],
+        };
+        let report = AuditReport::from_findings(vec![finding(
+            "artifact.no-code",
+            None,
+            FindingSeverity::Warn,
+        )]);
+        let a = report
+            .clone()
+            .apply_suppressions(&baseline, "2026-01-01")
+            .unwrap();
+        let merged = a.merge(report);
+        assert_eq!(merged.suppressed, 1);
+        assert_eq!(merged.findings.len(), 1);
+    }
+
+    #[test]
+    fn iso_dates_are_computed_without_a_calendar_dependency() {
+        assert_eq!(iso_date_from_days(0), "1970-01-01");
+        assert_eq!(iso_date_from_days(19_782), "2024-02-29");
+        let today = current_utc_date();
+        assert!(validate_date(&today).is_ok(), "{today}");
+        assert!(validate_date("2023-02-29").is_err());
+        assert!(validate_date("2024-02-29").is_ok());
+        assert!(validate_date("2026-1-01").is_err());
     }
 
     #[test]

@@ -49,6 +49,28 @@ same typed error mapping as every other method.
   error JSON remains unchanged.
 - `RpcErrorKind::as_str()` returns the stable snake_case string used in JSON.
 
+## Retry policy
+
+`observatory_rpc::RetryPolicy` bounds automatic retries for transient
+failures. Use `RpcClient::call_with_retry(method, params, &policy, &clock)` or
+the free `retry_call` function; the plain `call` and typed helpers never retry
+implicitly.
+
+- **What is retried:** transport failures (`RpcErrorKind::Transport`) and
+  server-side JSON-RPC errors (`internal`, `server`). Client errors (`parse`,
+  `invalid_request`, `method_not_found`, `invalid_params`) and non-RPC errors
+  are returned immediately, because retrying them cannot succeed.
+- **Backoff:** the delay after the first failed attempt is `base_delay`, then
+  doubles up to `max_delay`. `RetryPolicy::delay_for(n)` exposes it.
+- **Bound:** `max_attempts` counts the first call. With the default policy
+  (`DEFAULT_MAX_RETRY_ATTEMPTS = 3`, base 200 ms, cap 2 s) a transient failure
+  is attempted at most three times with 200 ms and 400 ms of backoff.
+- **Determinism:** sleeping goes through the `Clock` trait. Tests inject a
+  recording clock and assert the exact delays without waiting; production uses
+  `SystemClock`.
+- **Failure surfacing:** when attempts are exhausted, the last error is
+  returned unchanged, including its typed kind and raw code.
+
 ## Adding a new known code
 
 Add the mapping to `RpcErrorKind::from_code`, extend the table above, and add a

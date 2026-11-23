@@ -6,7 +6,7 @@
 //! nothing about the RPC shape is invented.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use observatory_core::limits::MAX_WASM_BYTES;
 use observatory_core::{ObservatoryError, Result};
@@ -16,11 +16,35 @@ use observatory_rpc::{LedgerEntryResult, RpcClient, Transport};
 use serde::Serialize;
 use stellar_xdr::{
     ContractDataDurability, ContractExecutable, ContractId, Hash, LedgerEntryData, LedgerKey,
-    LedgerKeyContractCode, LedgerKeyContractData, Limits, ReadXdr, ScAddress, ScVal, WriteXdr,
+    LedgerKeyContractCode, LedgerKeyContractData, Limits, ReadXdr, ScAddress, ScContractInstance,
+    ScMap, ScVal, WriteXdr,
 };
 
 /// Default number of ledger entries retained by a [`LedgerEntryCache`].
 pub const DEFAULT_LEDGER_CACHE_CAPACITY: usize = 128;
+
+/// Maximum instance-storage entries inspected for type counts.
+///
+/// The instance entry's storage map can be large. Only the first
+/// `MAX_STORAGE_ENTRIES_INSPECTED` entries contribute to the reported type
+/// counts; the total entry count is still reported and `truncated` is set when
+/// the map is larger. Entry values are never serialized.
+pub const MAX_STORAGE_ENTRIES_INSPECTED: usize = 256;
+
+/// Bounded summary of a contract instance's storage map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstanceStorage {
+    /// Total number of entries declared by the instance storage map.
+    pub entry_count: usize,
+    /// Number of entries inspected for type counts.
+    pub inspected_entries: usize,
+    /// Whether `entry_count` exceeded [`MAX_STORAGE_ENTRIES_INSPECTED`].
+    pub truncated: bool,
+    /// Counts of inspected keys by `ScVal` type name.
+    pub key_types: BTreeMap<String, usize>,
+    /// Counts of inspected values by `ScVal` type name.
+    pub value_types: BTreeMap<String, usize>,
+}
 
 /// Information recovered about a deployed contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -35,6 +59,8 @@ pub struct DeploymentInfo {
     pub live_until_ledger_seq: Option<u32>,
     /// Whether a contract instance entry was found.
     pub found: bool,
+    /// Bounded storage summary, when the instance carries a storage map.
+    pub storage: Option<InstanceStorage>,
 }
 
 /// A contract observed on one network, ready for cross-network comparison.
@@ -311,30 +337,103 @@ fn deployment_info(contract_id: &str, entry: Option<&LedgerEntryResult>) -> Resu
             last_modified_ledger_seq: None,
             live_until_ledger_seq: None,
             found: false,
+            storage: None,
         });
     };
+    let instance = decode_instance(entry)?;
+    let wasm_hash = instance
+        .as_ref()
+        .and_then(|instance| match &instance.executable {
+            ContractExecutable::Wasm(hash) => Some(hex::encode(hash.0)),
+            _ => None,
+        });
+    let storage = instance
+        .as_ref()
+        .and_then(|instance| instance.storage.as_ref())
+        .map(storage_summary);
     Ok(DeploymentInfo {
         contract_id: contract_id.to_string(),
-        wasm_hash: decode_wasm_hash(entry)?,
+        wasm_hash,
         last_modified_ledger_seq: entry.last_modified_ledger_seq,
         live_until_ledger_seq: entry.live_until_ledger_seq,
         found: true,
+        storage,
     })
 }
 
-/// Decode the WASM hash from a ledger entry result, if it is a WASM-backed instance.
-pub fn decode_wasm_hash(entry: &LedgerEntryResult) -> Result<Option<String>> {
+/// Decode the contract instance from a ledger entry, when the entry is one.
+fn decode_instance(entry: &LedgerEntryResult) -> Result<Option<ScContractInstance>> {
     let data = LedgerEntryData::from_xdr_base64(&entry.xdr, Limits::none())
         .map_err(|error| ObservatoryError::decode(format!("invalid ledger entry XDR: {error}")))?;
     let LedgerEntryData::ContractData(contract) = data else {
         return Ok(None);
     };
-    let ScVal::ContractInstance(instance) = contract.val else {
-        return Ok(None);
-    };
-    match instance.executable {
-        ContractExecutable::Wasm(hash) => Ok(Some(hex::encode(hash.0))),
+    match contract.val {
+        ScVal::ContractInstance(instance) => Ok(Some(instance)),
         _ => Ok(None),
+    }
+}
+
+/// Decode the WASM hash from a ledger entry result, if it is a WASM-backed instance.
+pub fn decode_wasm_hash(entry: &LedgerEntryResult) -> Result<Option<String>> {
+    Ok(
+        decode_instance(entry)?.and_then(|instance| match instance.executable {
+            ContractExecutable::Wasm(hash) => Some(hex::encode(hash.0)),
+            _ => None,
+        }),
+    )
+}
+
+/// Summarize a storage map without serializing keys or values.
+fn storage_summary(map: &ScMap) -> InstanceStorage {
+    let entry_count = map.len();
+    let mut key_types = BTreeMap::new();
+    let mut value_types = BTreeMap::new();
+    let mut inspected_entries = 0;
+    for entry in map.iter().take(MAX_STORAGE_ENTRIES_INSPECTED) {
+        *key_types
+            .entry(scval_type_name(&entry.key).to_string())
+            .or_insert(0) += 1;
+        *value_types
+            .entry(scval_type_name(&entry.val).to_string())
+            .or_insert(0) += 1;
+        inspected_entries += 1;
+    }
+    InstanceStorage {
+        entry_count,
+        inspected_entries,
+        truncated: entry_count > inspected_entries,
+        key_types,
+        value_types,
+    }
+}
+
+/// Stable type name for an `ScVal`, used as a bounded counting bucket.
+fn scval_type_name(value: &ScVal) -> &'static str {
+    match value {
+        ScVal::Bool(_) => "bool",
+        ScVal::Void => "void",
+        ScVal::Error(_) => "error",
+        ScVal::U32(_) => "u32",
+        ScVal::I32(_) => "i32",
+        ScVal::U64(_) => "u64",
+        ScVal::I64(_) => "i64",
+        ScVal::Timepoint(_) => "timepoint",
+        ScVal::Duration(_) => "duration",
+        ScVal::U128(_) => "u128",
+        ScVal::I128(_) => "i128",
+        ScVal::U256(_) => "u256",
+        ScVal::I256(_) => "i256",
+        ScVal::Bytes(_) => "bytes",
+        ScVal::String(_) => "string",
+        ScVal::Symbol(_) => "symbol",
+        ScVal::Vec(_) => "vec",
+        ScVal::Map(_) => "map",
+        ScVal::Address(_) => "address",
+        ScVal::ContractInstance(_) => "contract_instance",
+        ScVal::LedgerKeyContractInstance => "ledger_key_contract_instance",
+        ScVal::LedgerKeyNonce(_) => "ledger_key_nonce",
+        ScVal::ExecutableTag(_) => "executable_tag",
     }
 }
 
@@ -405,7 +504,8 @@ mod tests {
     use serde_json::json;
     use stellar_xdr::{
         ContractCodeCostInputs, ContractCodeEntry, ContractCodeEntryExt, ContractCodeEntryV1,
-        ContractDataEntry, ExtensionPoint, LedgerEntryData, ScContractInstance, WriteXdr,
+        ContractDataEntry, ExtensionPoint, LedgerEntryData, ScContractInstance, ScMap, ScMapEntry,
+        WriteXdr,
     };
 
     fn contract_id() -> String {
@@ -413,6 +513,10 @@ mod tests {
     }
 
     fn instance_entry(hash_byte: u8) -> LedgerEntryResult {
+        instance_entry_with_storage(hash_byte, None)
+    }
+
+    fn instance_entry_with_storage(hash_byte: u8, storage: Option<ScMap>) -> LedgerEntryResult {
         let data = LedgerEntryData::ContractData(ContractDataEntry {
             ext: ExtensionPoint::V0,
             contract: ScAddress::Contract(ContractId(Hash([9u8; 32]))),
@@ -420,7 +524,7 @@ mod tests {
             durability: ContractDataDurability::Persistent,
             val: ScVal::ContractInstance(ScContractInstance {
                 executable: ContractExecutable::Wasm(Hash([hash_byte; 32])),
-                storage: None,
+                storage,
             }),
         });
         LedgerEntryResult {
@@ -482,6 +586,81 @@ mod tests {
             decode_wasm_hash(&entry).unwrap(),
             Some(hex::encode([7u8; 32]))
         );
+    }
+
+    #[test]
+    fn instance_storage_is_summarized_without_values() {
+        let storage = ScMap::try_from(vec![
+            ScMapEntry {
+                key: ScVal::U32(1),
+                val: ScVal::Bool(true),
+            },
+            ScMapEntry {
+                key: ScVal::U32(2),
+                val: ScVal::I32(-1),
+            },
+            ScMapEntry {
+                key: ScVal::Bool(false),
+                val: ScVal::Void,
+            },
+        ])
+        .unwrap();
+        let entry = instance_entry_with_storage(3, Some(storage));
+        let transport = instance_transport(&entry);
+        let client = RpcClient::new(Endpoint::parse("https://example.org").unwrap(), transport);
+
+        let info = inspect(&client, &contract_id()).unwrap();
+        let summary = info.storage.expect("storage is present");
+        assert_eq!(summary.entry_count, 3);
+        assert_eq!(summary.inspected_entries, 3);
+        assert!(!summary.truncated);
+        assert_eq!(
+            summary.key_types,
+            BTreeMap::from([("bool".to_string(), 1), ("u32".to_string(), 2)])
+        );
+        assert_eq!(
+            summary.value_types,
+            BTreeMap::from([
+                ("bool".to_string(), 1),
+                ("i32".to_string(), 1),
+                ("void".to_string(), 1)
+            ])
+        );
+        assert_eq!(info.wasm_hash, Some(hex::encode([3u8; 32])));
+    }
+
+    #[test]
+    fn oversized_instance_storage_is_bounded() {
+        let entries: Vec<ScMapEntry> = (0..MAX_STORAGE_ENTRIES_INSPECTED + 5)
+            .map(|index| ScMapEntry {
+                key: ScVal::U32(index as u32),
+                val: ScVal::U32(index as u32),
+            })
+            .collect();
+        let entry = instance_entry_with_storage(4, Some(ScMap::try_from(entries).unwrap()));
+        let transport = instance_transport(&entry);
+        let client = RpcClient::new(Endpoint::parse("https://example.org").unwrap(), transport);
+
+        let summary = inspect(&client, &contract_id())
+            .unwrap()
+            .storage
+            .expect("storage is present");
+        assert_eq!(summary.entry_count, MAX_STORAGE_ENTRIES_INSPECTED + 5);
+        assert_eq!(summary.inspected_entries, MAX_STORAGE_ENTRIES_INSPECTED);
+        assert!(summary.truncated);
+        assert_eq!(
+            summary.key_types.values().sum::<usize>(),
+            MAX_STORAGE_ENTRIES_INSPECTED
+        );
+        assert_eq!(summary.key_types, summary.value_types);
+    }
+
+    #[test]
+    fn instance_without_storage_reports_none() {
+        let entry = instance_entry(3);
+        let transport = instance_transport(&entry);
+        let client = RpcClient::new(Endpoint::parse("https://example.org").unwrap(), transport);
+        assert_eq!(inspect(&client, &contract_id()).unwrap().storage, None);
     }
 
     #[test]

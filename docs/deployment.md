@@ -111,7 +111,28 @@ entries.
 ## Reported fields
 
 `contract_id`, `wasm_hash`, `last_modified_ledger_seq`,
-`live_until_ledger_seq`, and `found`.
+`live_until_ledger_seq`, `found`, and the bounded `storage` summary described
+above (`null` when the instance has no storage map).
+
+## Instance storage
+
+The contract instance entry carries an optional `ScMap` of storage entries.
+`inspect` decodes it and reports a bounded summary:
+
+- `entry_count` — every entry the map declares;
+- `inspected_entries` — how many entries contributed to the type counts;
+- `truncated` — true when the map is larger than the inspection bound;
+- `key_types` and `value_types` — counts of inspected keys and values by
+  `ScVal` type name (for example `symbol`, `u32`, `address`).
+
+Limits and safety:
+
+- At most `MAX_STORAGE_ENTRIES_INSPECTED` (256) entries are inspected. A larger
+  map still reports its true `entry_count` and sets `truncated`.
+- Only type names and counts are serialized. Keys and values — including bytes,
+  strings, and nested maps — are never included in the report.
+- An instance without a storage map reports `storage: null`.
+- No value is decoded recursively, so the work per entry is constant.
 
 ## Cross-network comparison
 

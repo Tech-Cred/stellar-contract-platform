@@ -75,6 +75,9 @@ enum Command {
         /// Dump a named custom section as bounded hex (max 64 KiB).
         #[arg(long, value_name = "NAME")]
         dump_section: Option<String>,
+        /// Baseline suppression file (`.json`, `.yml`/`.yaml`, or `.toml`).
+        #[arg(long, value_name = "FILE", requires = "security")]
+        baseline: Option<PathBuf>,
     },
     /// Inspect the contract specification embedded in a WASM artifact.
     Spec {
@@ -392,6 +395,7 @@ fn run(cli: &Cli, format: OutputFormat) -> Result<ObservatoryExit> {
             wasm,
             security,
             dump_section,
+            baseline,
         } => {
             let bytes = observatory_wasm::load_file(wasm)?;
             let report = observatory_wasm::inspect(&bytes)?;
@@ -404,6 +408,11 @@ fn run(cli: &Cli, format: OutputFormat) -> Result<ObservatoryExit> {
                         &project.audit,
                     )?);
                 }
+            }
+            if let Some(path) = baseline {
+                let suppressions = load_suppressions(path)?;
+                audit = audit
+                    .apply_suppressions(&suppressions, &observatory_audit::current_utc_date())?;
             }
             let section = match dump_section {
                 Some(name) => {
@@ -979,6 +988,28 @@ fn read_json(path: &Path) -> Result<serde_json::Value> {
     })
 }
 
+fn load_suppressions(path: &Path) -> Result<observatory_audit::SuppressionFile> {
+    let format = observatory_platform::ConfigFormat::from_path(path)?;
+    let text = read_text(path)?;
+    let parsed: std::result::Result<observatory_audit::SuppressionFile, String> = match format {
+        observatory_platform::ConfigFormat::Yaml => {
+            serde_yaml_ng::from_str(&text).map_err(|error| error.to_string())
+        }
+        observatory_platform::ConfigFormat::Toml => {
+            toml::from_str(&text).map_err(|error| error.to_string())
+        }
+        observatory_platform::ConfigFormat::Json => {
+            serde_json::from_str(&text).map_err(|error| error.to_string())
+        }
+    };
+    parsed.map_err(|error| {
+        ObservatoryError::invalid(format!(
+            "invalid suppression file `{}`: {error}",
+            path.display()
+        ))
+    })
+}
+
 fn emit<T: Serialize>(
     format: OutputFormat,
     kind: &str,
@@ -1084,7 +1115,15 @@ fn print_inspect(payload: &serde_json::Value) {
         }
     );
     if let Some(audit) = payload.get("audit").filter(|value| !value.is_null()) {
-        println!("audit: {}", audit["status"].as_str().unwrap_or("PASS"));
+        let suppressed = audit["suppressed"].as_u64().unwrap_or(0);
+        if suppressed > 0 {
+            println!(
+                "audit: {} ({suppressed} suppressed)",
+                audit["status"].as_str().unwrap_or("PASS")
+            );
+        } else {
+            println!("audit: {}", audit["status"].as_str().unwrap_or("PASS"));
+        }
     }
     if let Some(section) = payload.get("section").filter(|value| !value.is_null()) {
         let name = section["name"].as_str().unwrap_or_default();
@@ -1271,6 +1310,20 @@ fn print_deployment(info: &observatory_deployment::DeploymentInfo) {
         "wasm_hash: {}",
         info.wasm_hash.as_deref().unwrap_or("<unknown>")
     );
+    if let Some(storage) = &info.storage {
+        println!(
+            "storage: {} entries ({} inspected{})",
+            storage.entry_count,
+            storage.inspected_entries,
+            if storage.truncated { ", truncated" } else { "" }
+        );
+        for (kind, count) in &storage.key_types {
+            println!("  key {kind}: {count}");
+        }
+        for (kind, count) in &storage.value_types {
+            println!("  value {kind}: {count}");
+        }
+    }
 }
 
 fn print_network_comparison(comparison: &observatory_deployment::NetworkComparison) {

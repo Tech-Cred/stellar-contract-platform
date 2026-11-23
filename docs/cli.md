@@ -19,11 +19,16 @@ stellar-contract-platform [OPTIONS] <COMMAND>
 
 ## Commands
 
-### `inspect <WASM> [--security] [--dump-section <NAME>]`
+### `inspect <WASM> [--security] [--baseline <FILE>] [--dump-section <NAME>]`
 
 Inspects a WASM artifact: size, version, artifact SHA-256, type/function/table/
 global counts, memories, imports, exports, custom sections, and code size. With
 `--security`, runs bounded heuristics.
+
+`--baseline <FILE>` (requires `--security`) hides findings listed in a
+suppression file and reports the count separately; see
+[security.md](security.md#baseline-suppressions). The file may be JSON, YAML, or
+TOML.
 
 `--dump-section <NAME>` prints the named custom section payload as lowercase
 hex. The dump is bounded at 64 KiB: a larger payload is rejected with an error

@@ -36,10 +36,150 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum events accepted in a single `getEvents` page.
 pub const MAX_EVENTS_PAGE: usize = 10_000;
 
+/// Default maximum number of attempts for a retried RPC call.
+pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 3;
+
+/// Default delay before the first retry.
+pub const DEFAULT_RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
+
+/// Default cap on the delay between retries.
+pub const DEFAULT_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
+
 /// A JSON-RPC transport. Implementations move already-built envelopes.
 pub trait Transport {
     /// Send a JSON-RPC request envelope and return the response envelope.
     fn send(&self, request: &Value) -> Result<Value>;
+}
+
+/// A blocking clock, injectable so retry tests never wait.
+pub trait Clock {
+    /// Sleep for `duration`.
+    fn sleep(&self, duration: Duration);
+}
+
+/// The wall clock, used outside tests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// A bounded retry policy for transient RPC failures.
+///
+/// Only transport failures and server-side JSON-RPC errors
+/// ([`RpcErrorKind::Transport`], [`RpcErrorKind::Internal`], and
+/// [`RpcErrorKind::Server`]) are retried. Client errors such as invalid
+/// parameters or an unknown method are returned immediately: retrying them
+/// cannot succeed. Delays grow exponentially from
+/// [`RetryPolicy::base_delay`], are capped at [`RetryPolicy::max_delay`], and
+/// the total number of attempts is bounded by [`RetryPolicy::max_attempts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    max_attempts: u32,
+    base_delay: Duration,
+    max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        RetryPolicy {
+            max_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            base_delay: DEFAULT_RETRY_BASE_DELAY,
+            max_delay: DEFAULT_RETRY_MAX_DELAY,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Build a policy, rejecting zero attempts, delays, or a cap below the base.
+    pub fn new(max_attempts: u32, base_delay: Duration, max_delay: Duration) -> Result<Self> {
+        if max_attempts == 0 {
+            return Err(ObservatoryError::invalid(
+                "RPC retry attempts must be greater than zero",
+            ));
+        }
+        if base_delay.is_zero() {
+            return Err(ObservatoryError::invalid(
+                "RPC retry base delay must be greater than zero",
+            ));
+        }
+        if max_delay < base_delay {
+            return Err(ObservatoryError::invalid(
+                "RPC retry maximum delay must not be smaller than the base delay",
+            ));
+        }
+        Ok(RetryPolicy {
+            max_attempts,
+            base_delay,
+            max_delay,
+        })
+    }
+
+    /// The maximum number of attempts, including the first.
+    #[must_use]
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// The delay before the first retry.
+    #[must_use]
+    pub fn base_delay(&self) -> Duration {
+        self.base_delay
+    }
+
+    /// The delay cap.
+    #[must_use]
+    pub fn max_delay(&self) -> Duration {
+        self.max_delay
+    }
+
+    /// The delay after failed attempt `attempt` (1-based): `base * 2^(n-1)`.
+    #[must_use]
+    pub fn delay_for(&self, attempt: u32) -> Duration {
+        let factor = 1u32 << attempt.saturating_sub(1).min(31);
+        self.base_delay.saturating_mul(factor).min(self.max_delay)
+    }
+}
+
+/// Whether a failure is transient and safe to retry.
+///
+/// Only transport failures and server-side JSON-RPC codes are retryable;
+/// client errors and non-RPC errors are not.
+#[must_use]
+pub fn is_retryable(error: &ObservatoryError) -> bool {
+    match error {
+        ObservatoryError::Rpc(error) => matches!(
+            error.kind(),
+            RpcErrorKind::Transport | RpcErrorKind::Internal | RpcErrorKind::Server
+        ),
+        _ => false,
+    }
+}
+
+/// Run `operation` under a bounded retry policy, sleeping on `clock` between
+/// attempts.
+///
+/// `operation` receives the 1-based attempt number. The first non-retryable
+/// error, or the error from the final attempt, is returned unchanged.
+pub fn retry_call<T>(
+    policy: &RetryPolicy,
+    clock: &dyn Clock,
+    mut operation: impl FnMut(u32) -> Result<T>,
+) -> Result<T> {
+    let mut attempt = 1;
+    loop {
+        match operation(attempt) {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < policy.max_attempts && is_retryable(&error) => {
+                clock.sleep(policy.delay_for(attempt));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Default timeout for establishing a TCP/TLS connection.
@@ -396,6 +536,20 @@ impl<T: Transport> RpcClient<T> {
             .get("result")
             .cloned()
             .ok_or_else(|| ObservatoryError::rpc(format!("{method} response had no result")))
+    }
+
+    /// Call a JSON-RPC method under a bounded [`RetryPolicy`].
+    ///
+    /// Only transient failures are retried; see [`is_retryable`]. The clock is
+    /// injected so tests are deterministic and do not sleep.
+    pub fn call_with_retry(
+        &self,
+        method: &str,
+        params: Value,
+        policy: &RetryPolicy,
+        clock: &dyn Clock,
+    ) -> Result<Value> {
+        retry_call(policy, clock, |_| self.call(method, params.clone()))
     }
 
     /// Fetch the latest ledger.
@@ -1068,5 +1222,158 @@ mod tests {
         let client = RpcClient::new(Endpoint::parse("https://example.org").unwrap(), transport);
         let error = client.get_events(json!({})).unwrap_err();
         assert!(matches!(error, ObservatoryError::Rpc(_)));
+    }
+
+    #[derive(Debug)]
+    struct RecordingClock(std::cell::RefCell<Vec<Duration>>);
+
+    impl RecordingClock {
+        fn new() -> Self {
+            RecordingClock(std::cell::RefCell::new(Vec::new()))
+        }
+
+        fn sleeps(&self) -> Vec<Duration> {
+            self.0.borrow().clone()
+        }
+    }
+
+    impl Clock for RecordingClock {
+        fn sleep(&self, duration: Duration) {
+            self.0.borrow_mut().push(duration);
+        }
+    }
+
+    /// Fails with a transport error for the first N calls, then succeeds.
+    #[derive(Debug)]
+    struct FlakyTransport {
+        remaining_failures: std::cell::Cell<usize>,
+        calls: std::cell::Cell<usize>,
+        error: fn() -> ObservatoryError,
+    }
+
+    impl FlakyTransport {
+        fn new(failures: usize, error: fn() -> ObservatoryError) -> Self {
+            FlakyTransport {
+                remaining_failures: std::cell::Cell::new(failures),
+                calls: std::cell::Cell::new(0),
+                error,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.get()
+        }
+    }
+
+    impl Transport for FlakyTransport {
+        fn send(&self, _request: &Value) -> Result<Value> {
+            self.calls.set(self.calls.get() + 1);
+            if self.remaining_failures.get() > 0 {
+                self.remaining_failures
+                    .set(self.remaining_failures.get() - 1);
+                return Err((self.error)());
+            }
+            Ok(json!({ "jsonrpc": "2.0", "id": 1, "result": { "sequence": 7 } }))
+        }
+    }
+
+    fn transport_failure() -> ObservatoryError {
+        ObservatoryError::rpc("connection reset")
+    }
+
+    fn client_failure() -> ObservatoryError {
+        ObservatoryError::from_rpc_error(RpcError::from_code(-32602, "invalid params"))
+    }
+
+    #[test]
+    fn retry_policy_rejects_invalid_values() {
+        assert!(RetryPolicy::new(0, Duration::from_millis(1), Duration::from_millis(2)).is_err());
+        assert!(RetryPolicy::new(1, Duration::ZERO, Duration::from_millis(2)).is_err());
+        assert!(RetryPolicy::new(1, Duration::from_millis(2), Duration::from_millis(1)).is_err());
+        assert!(RetryPolicy::new(1, Duration::from_millis(1), Duration::from_millis(1)).is_ok());
+        assert_eq!(
+            RetryPolicy::default().max_attempts(),
+            DEFAULT_MAX_RETRY_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn backoff_is_exponential_and_capped() {
+        let policy =
+            RetryPolicy::new(10, Duration::from_millis(100), Duration::from_millis(350)).unwrap();
+        assert_eq!(policy.delay_for(1), Duration::from_millis(100));
+        assert_eq!(policy.delay_for(2), Duration::from_millis(200));
+        assert_eq!(policy.delay_for(3), Duration::from_millis(350));
+        assert_eq!(policy.delay_for(4), Duration::from_millis(350));
+        assert_eq!(policy.delay_for(u32::MAX), Duration::from_millis(350));
+    }
+
+    #[test]
+    fn retries_transient_failures_with_deterministic_backoff() {
+        let transport = FlakyTransport::new(2, transport_failure);
+        let client = RpcClient::new(Endpoint::parse("https://example.org").unwrap(), &transport);
+        let policy =
+            RetryPolicy::new(3, Duration::from_millis(10), Duration::from_millis(15)).unwrap();
+        let clock = RecordingClock::new();
+
+        let result = client
+            .call_with_retry("getLatestLedger", json!({}), &policy, &clock)
+            .unwrap();
+
+        assert_eq!(result["sequence"], 7);
+        assert_eq!(transport.calls(), 3);
+        assert_eq!(
+            clock.sleeps(),
+            vec![Duration::from_millis(10), Duration::from_millis(15)]
+        );
+    }
+
+    #[test]
+    fn client_errors_are_never_retried() {
+        let transport = FlakyTransport::new(3, client_failure);
+        let client = RpcClient::new(Endpoint::parse("https://example.org").unwrap(), &transport);
+        let clock = RecordingClock::new();
+
+        let error = client
+            .call_with_retry("getNetwork", json!({}), &RetryPolicy::default(), &clock)
+            .unwrap_err();
+
+        assert_eq!(transport.calls(), 1);
+        assert!(clock.sleeps().is_empty());
+        assert_eq!(
+            error.rpc_error().map(RpcError::kind),
+            Some(RpcErrorKind::InvalidParams)
+        );
+    }
+
+    #[test]
+    fn retries_are_bounded_by_max_attempts() {
+        let transport = FlakyTransport::new(10, transport_failure);
+        let client = RpcClient::new(Endpoint::parse("https://example.org").unwrap(), &transport);
+        let policy =
+            RetryPolicy::new(3, Duration::from_millis(10), Duration::from_millis(20)).unwrap();
+        let clock = RecordingClock::new();
+
+        let error = client
+            .call_with_retry("getNetwork", json!({}), &policy, &clock)
+            .unwrap_err();
+
+        assert!(matches!(error, ObservatoryError::Rpc(_)));
+        assert_eq!(transport.calls(), 3);
+        assert_eq!(
+            clock.sleeps(),
+            vec![Duration::from_millis(10), Duration::from_millis(20)]
+        );
+    }
+
+    #[test]
+    fn server_side_errors_are_retryable_but_parse_errors_are_not() {
+        let server = ObservatoryError::from_rpc_error(RpcError::from_code(-32000, "unavailable"));
+        let internal = ObservatoryError::from_rpc_error(RpcError::from_code(-32603, "busy"));
+        let parse = ObservatoryError::from_rpc_error(RpcError::from_code(-32700, "bad json"));
+        assert!(is_retryable(&server));
+        assert!(is_retryable(&internal));
+        assert!(!is_retryable(&parse));
+        assert!(!is_retryable(&ObservatoryError::invalid("bad request")));
     }
 }
