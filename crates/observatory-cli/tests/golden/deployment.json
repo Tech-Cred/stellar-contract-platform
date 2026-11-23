@@ -4,6 +4,7 @@
     "found": true,
     "last_modified_ledger_seq": 123,
     "live_until_ledger_seq": 456,
+    "storage": null,
     "wasm_hash": "0707070707070707070707070707070707070707070707070707070707070707"
   },
   "kind": "deployment",

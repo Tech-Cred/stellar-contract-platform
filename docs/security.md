@@ -81,6 +81,35 @@ audit:
 - Every id must appear in the rule table and in the crate's `RULE_IDS` registry.
   An unknown id is a configuration error, not a silently ignored rule.
 
+### Baseline suppressions
+
+Accepted findings can be hidden with `inspect --security --baseline <FILE>`
+(`.json`, `.yml`/`.yaml`, or `.toml`). Suppressed findings are removed from the
+report but counted in `suppressed`, and the status is recomputed from the
+remaining findings, so the result never pretends a finding was fixed.
+
+```yaml
+suppressions:
+  - rule: artifact.no-code
+    reason: Intermediate build artifact; the deployable module is checked in CI.
+    expires: 2026-12-31
+  - rule: function.empty-name
+    path: function::
+    reason: Generated stub retained for ABI compatibility.
+```
+
+- `rule` must be a registered rule id.
+- `path` is optional. When present it must match the finding's path exactly;
+  when absent the rule is suppressed at every path.
+- `reason` is required and must be non-empty, so CI history records why the
+  waiver exists.
+- `expires` is optional and is the last day the suppression applies, in
+  `YYYY-MM-DD`. After that date the finding is reported again; expired entries
+  are not errors, so stale baselines surface instead of disappearing.
+- Unknown fields, unknown rule ids, empty paths or reasons, and malformed dates
+  are errors (exit code `2`), never ignored.
+- The file is validated even when no finding matches.
+
 > These checks are **not** a security audit and provide no guarantees. They catch
 > structural inconsistencies, nothing more.
 

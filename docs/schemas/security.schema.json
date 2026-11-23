@@ -16,6 +16,11 @@
       "required": ["status", "findings"],
       "properties": {
         "status": { "enum": ["PASS", "WARN", "ERROR"] },
+        "suppressed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Findings hidden by a baseline suppression. Omitted when zero."
+        },
         "findings": {
           "type": "array",
           "items": {
