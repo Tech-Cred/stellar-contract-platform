@@ -4,6 +4,11 @@
     "found": true,
     "last_modified_ledger_seq": 123,
     "live_until_ledger_seq": 456,
+    "network": {
+      "default_rpc_url": "https://soroban-testnet.stellar.org",
+      "network": "testnet",
+      "passphrase": "Test SDF Network ; September 2015"
+    },
     "storage": null,
     "wasm_hash": "0707070707070707070707070707070707070707070707070707070707070707"
   },

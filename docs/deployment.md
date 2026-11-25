@@ -28,6 +28,19 @@ stellar-contract-platform deployment inspect C... \
   --rpc-fixture rpc.json --network testnet
 ```
 
+### Network profiles
+
+`--network` is resolved to a `NetworkProfile` in `observatory-core`: the
+canonical name, the network passphrase and a default RPC endpoint. Accepted
+labels are `public` (also `mainnet`, `pubnet`), `testnet` (also `test`) and
+`futurenet` (also `future`); any other label is rejected before the lookup.
+
+`inspect` records the resolved profile in its output as `network`, with the
+name, passphrase and default endpoint. When neither `--rpc-url` nor the project
+config sets an endpoint, the profile's default endpoint is used and validated.
+The fixture transport makes no requests, so that endpoint is recorded but not
+called. Library callers get the same record from `inspect_on_network`.
+
 ### Live HTTPS transport
 
 `observatory_rpc::HttpTransport` implements `Transport` over HTTPS. It is behind

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
 use observatory_core::limits::MAX_WASM_BYTES;
-use observatory_core::{ObservatoryError, Result};
+use observatory_core::{Network, NetworkProfile, ObservatoryError, Result};
 use observatory_diff::{diff, InterfaceDiff};
 use observatory_interface::ContractInterface;
 use observatory_rpc::{LedgerEntryResult, RpcClient, Transport};
@@ -61,6 +61,9 @@ pub struct DeploymentInfo {
     pub found: bool,
     /// Bounded storage summary, when the instance carries a storage map.
     pub storage: Option<InstanceStorage>,
+    /// The resolved network profile, when the lookup was made on a named network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkProfile>,
 }
 
 /// A contract observed on one network, ready for cross-network comparison.
@@ -316,6 +319,18 @@ pub fn inspect<T: Transport>(client: &RpcClient<T>, contract_id: &str) -> Result
     deployment_info(contract_id, entries.first())
 }
 
+/// Inspect a deployed contract on a named network, recording the resolved
+/// [`NetworkProfile`] in the result.
+pub fn inspect_on_network<T: Transport>(
+    client: &RpcClient<T>,
+    contract_id: &str,
+    network: Network,
+) -> Result<DeploymentInfo> {
+    let mut info = inspect(client, contract_id)?;
+    info.network = Some(network.profile());
+    Ok(info)
+}
+
 /// Inspect a deployed contract using a [`LedgerEntryCache`].
 ///
 /// Repeating the same lookup with the same cache performs one RPC call.
@@ -338,6 +353,7 @@ fn deployment_info(contract_id: &str, entry: Option<&LedgerEntryResult>) -> Resu
             live_until_ledger_seq: None,
             found: false,
             storage: None,
+            network: None,
         });
     };
     let instance = decode_instance(entry)?;
@@ -358,6 +374,7 @@ fn deployment_info(contract_id: &str, entry: Option<&LedgerEntryResult>) -> Resu
         live_until_ledger_seq: entry.live_until_ledger_seq,
         found: true,
         storage,
+        network: None,
     })
 }
 
