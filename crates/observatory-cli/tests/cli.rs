@@ -721,6 +721,50 @@ fn deployment_compare_reports_identical_local_artifacts_as_matched() {
 }
 
 #[test]
+fn deployment_inspect_records_the_resolved_network() {
+    let contract_id = format!("{}", stellar_strkey::Contract([9u8; 32]));
+    let fixture = write_temp(instance_fixture([7u8; 32]).as_bytes(), ".json");
+    binary()
+        .args([
+            "deployment",
+            "inspect",
+            &contract_id,
+            "--rpc-fixture",
+            fixture.path().to_str().unwrap(),
+            "--network",
+            "mainnet",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"network\": \"public\""))
+        .stdout(predicate::str::contains(
+            "\"passphrase\": \"Public Global Stellar Network ; September 2015\"",
+        ))
+        .stdout(predicate::str::contains(
+            "\"default_rpc_url\": \"https://mainnet.sorobanrpc.com\"",
+        ));
+}
+
+#[test]
+fn deployment_inspect_rejects_an_unknown_network_label() {
+    let contract_id = format!("{}", stellar_strkey::Contract([9u8; 32]));
+    let fixture = write_temp(instance_fixture([7u8; 32]).as_bytes(), ".json");
+    binary()
+        .args([
+            "deployment",
+            "inspect",
+            &contract_id,
+            "--rpc-fixture",
+            fixture.path().to_str().unwrap(),
+            "--network",
+            "devnet",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn deployment_compare_separates_hash_from_interface_changes() {
     let wasm = module_with_spec(&[spec_function("hello", &[], None)]);
     let mut other = wasm.clone();

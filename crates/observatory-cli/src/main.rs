@@ -584,15 +584,13 @@ fn run(cli: &Cli, format: OutputFormat) -> Result<ObservatoryExit> {
             rpc_url,
         }) => {
             let client = fixture_client(rpc_fixture)?;
-            let network = resolve_network(&project, network);
-            let _ = network.parse::<Network>()?;
+            let network = resolve_network(&project, network).parse::<Network>()?;
             let endpoint = rpc_url
                 .as_deref()
-                .or(project.rpc_endpoint_for(cli.profile.as_deref())?);
-            if let Some(url) = endpoint {
-                let _ = Endpoint::parse(url)?;
-            }
-            let info = observatory_deployment::inspect(&client, contract)?;
+                .or(project.rpc_endpoint_for(cli.profile.as_deref())?)
+                .unwrap_or(network.profile().default_rpc_url);
+            let _ = Endpoint::parse(endpoint)?;
+            let info = observatory_deployment::inspect_on_network(&client, contract, network)?;
             emit(format, "deployment", &info, || print_deployment(&info))?;
             Ok(ObservatoryExit::Success)
         }
@@ -1268,6 +1266,9 @@ fn print_fingerprint(payload: &serde_json::Value) {
 fn print_deployment(info: &observatory_deployment::DeploymentInfo) {
     println!("contract: {}", info.contract_id);
     println!("found: {}", info.found);
+    if let Some(profile) = &info.network {
+        println!("network: {} ({})", profile.network, profile.passphrase);
+    }
     println!(
         "wasm_hash: {}",
         info.wasm_hash.as_deref().unwrap_or("<unknown>")

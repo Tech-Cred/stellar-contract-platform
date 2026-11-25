@@ -11,7 +11,7 @@ pub mod network;
 pub mod output;
 
 pub use error::{ErrorCode, ExitCode, ObservatoryError, Result, RpcError, RpcErrorKind};
-pub use network::Network;
+pub use network::{Network, NetworkProfile};
 pub use output::OutputFormat;
 
 /// The binary/tool name used in user-facing output.

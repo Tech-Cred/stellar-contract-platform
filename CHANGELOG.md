@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Deployment: `deployment inspect` resolves `--network` to a `NetworkProfile`
+  (canonical name, passphrase and default RPC endpoint) and rejects unknown
+  labels. It falls back to the profile's default endpoint when no `--rpc-url`
+  or project endpoint is set, and records the resolved profile in its output.
+  `observatory_deployment::inspect_on_network` gives library callers the same
+  record. Closes #91.
 - Events: `RpcClient::get_events` reads a bounded `getEvents` page, and
   `observatory-events` normalizes RPC events (`topic`/`value` ScVals) into
   `EventRecord`. `events --rpc-fixture` paginates a mock response offline (#36).

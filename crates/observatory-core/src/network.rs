@@ -84,6 +84,32 @@ impl FromStr for Network {
     }
 }
 
+/// The resolved profile for a [`Network`]: its passphrase and default RPC endpoint.
+///
+/// Both values are public constants, so a profile can be recorded in output
+/// without any network access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct NetworkProfile {
+    /// The network this profile describes.
+    pub network: Network,
+    /// The canonical network passphrase.
+    pub passphrase: &'static str,
+    /// The default RPC endpoint, used when no override is given.
+    pub default_rpc_url: &'static str,
+}
+
+impl Network {
+    /// Resolves this network to its profile.
+    #[must_use]
+    pub fn profile(self) -> NetworkProfile {
+        NetworkProfile {
+            network: self,
+            passphrase: self.passphrase(),
+            default_rpc_url: self.default_rpc_url(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +130,17 @@ mod tests {
     #[test]
     fn unknown_network_errors() {
         assert!("devnet".parse::<Network>().is_err());
+    }
+
+    #[test]
+    fn profile_carries_the_passphrase_and_default_endpoint() {
+        let profile = "mainnet".parse::<Network>().unwrap().profile();
+        assert_eq!(profile.network, Network::Public);
+        assert_eq!(
+            profile.passphrase,
+            "Public Global Stellar Network ; September 2015"
+        );
+        assert_eq!(profile.default_rpc_url, "https://mainnet.sorobanrpc.com");
     }
 
     #[test]
