@@ -16,6 +16,7 @@
 //! | Removing a type | incompatible |
 //! | Renaming a type (identical shape) | incompatible |
 //! | Changing a type definition | incompatible |
+//! | Adding a case to a union | incompatible (policy-configurable) |
 //! | Removing an event | incompatible |
 //! | Renaming an event (identical shape) | incompatible |
 //! | Changing an event | incompatible |
@@ -57,10 +58,21 @@ pub struct CompatibilityPolicy {
     pub type_removal_is_breaking: bool,
     /// Changing a type definition is breaking.
     pub type_change_is_breaking: bool,
+    /// Adding a case to an existing union is breaking.
+    ///
+    /// Decoders that exhaustively handle union cases may reject new values, so
+    /// this stays strict unless a caller explicitly relaxes it.
+    #[serde(default = "default_union_case_addition_is_breaking")]
+    pub union_case_addition_is_breaking: bool,
     /// Removing an event is breaking.
     pub event_removal_is_breaking: bool,
     /// Changing an event definition is breaking.
     pub event_change_is_breaking: bool,
+}
+
+/// Default for policy documents that predate the union-case rule.
+fn default_union_case_addition_is_breaking() -> bool {
+    true
 }
 
 impl Default for CompatibilityPolicy {
@@ -78,6 +90,7 @@ impl CompatibilityPolicy {
             signature_change_is_breaking: true,
             type_removal_is_breaking: true,
             type_change_is_breaking: true,
+            union_case_addition_is_breaking: true,
             event_removal_is_breaking: true,
             event_change_is_breaking: true,
         }
@@ -94,6 +107,7 @@ impl CompatibilityPolicy {
             signature_change_is_breaking: false,
             type_removal_is_breaking: false,
             type_change_is_breaking: false,
+            union_case_addition_is_breaking: false,
             event_removal_is_breaking: false,
             event_change_is_breaking: false,
         }
@@ -109,6 +123,7 @@ impl CompatibilityPolicy {
             }
             ChangeKind::TypeRemoved | ChangeKind::TypeRenamed => self.type_removal_is_breaking,
             ChangeKind::TypeChanged => self.type_change_is_breaking,
+            ChangeKind::UnionCaseAdded => self.union_case_addition_is_breaking,
             ChangeKind::EventRemoved | ChangeKind::EventRenamed => self.event_removal_is_breaking,
             ChangeKind::EventChanged => self.event_change_is_breaking,
             ChangeKind::FunctionAdded | ChangeKind::TypeAdded | ChangeKind::EventAdded => false,
@@ -205,7 +220,7 @@ pub fn assess(
 mod tests {
     use super::*;
     use observatory_spec::normalize;
-    use observatory_testutil::spec::{spec_event, spec_function, spec_struct};
+    use observatory_testutil::spec::{spec_event, spec_function, spec_struct, spec_union};
     use stellar_xdr::{ScSpecEntry, ScSpecTypeDef};
 
     fn interface(entries: Vec<ScSpecEntry>) -> ContractInterface {
@@ -255,6 +270,76 @@ mod tests {
             assess(&old, &new, CompatibilityPolicy::default()).status,
             CompatibilityStatus::Incompatible
         );
+    }
+
+    #[test]
+    fn union_case_addition_is_incompatible_by_default() {
+        let old = interface(vec![spec_union("Choice", &[("A", None)])]);
+        let new = interface(vec![spec_union(
+            "Choice",
+            &[("A", None), ("B", Some(vec![ScSpecTypeDef::U32]))],
+        )]);
+        let assessment = assess(&old, &new, CompatibilityPolicy::default());
+        assert_eq!(assessment.status, CompatibilityStatus::Incompatible);
+        let reason = assessment
+            .reasons
+            .iter()
+            .find(|r| r.path == "type::Choice")
+            .expect("union reason");
+        assert!(reason.breaking);
+        assert!(reason.message.contains("added case(s): B"));
+        assert!(assessment
+            .diff
+            .changes
+            .iter()
+            .any(|c| c.kind == ChangeKind::UnionCaseAdded));
+    }
+
+    #[test]
+    fn union_case_addition_can_be_relaxed_without_relaxing_other_rules() {
+        let old = interface(vec![
+            spec_union("Choice", &[("A", None)]),
+            spec_struct("S", &[("a", ScSpecTypeDef::U32)]),
+        ]);
+        let new = interface(vec![
+            spec_union(
+                "Choice",
+                &[("A", None), ("B", Some(vec![ScSpecTypeDef::U32]))],
+            ),
+            spec_struct("S", &[("a", ScSpecTypeDef::U64)]),
+        ]);
+        let policy = CompatibilityPolicy {
+            union_case_addition_is_breaking: false,
+            ..CompatibilityPolicy::strict()
+        };
+        let assessment = assess(&old, &new, policy);
+        assert_eq!(assessment.status, CompatibilityStatus::Incompatible);
+        let union_reason = assessment
+            .reasons
+            .iter()
+            .find(|r| r.path == "type::Choice")
+            .expect("union reason");
+        assert!(!union_reason.breaking);
+        let struct_reason = assessment
+            .reasons
+            .iter()
+            .find(|r| r.path == "type::S")
+            .expect("struct reason");
+        assert!(struct_reason.breaking);
+    }
+
+    #[test]
+    fn lenient_policy_accepts_union_case_additions_as_notes() {
+        let old = interface(vec![spec_union("Choice", &[("A", None)])]);
+        let new = interface(vec![spec_union("Choice", &[("A", None), ("B", None)])]);
+        let policy = CompatibilityPolicy::lenient();
+        assert!(!policy.is_breaking(ChangeKind::UnionCaseAdded));
+        let assessment = assess(&old, &new, policy);
+        assert_eq!(assessment.status, CompatibilityStatus::Compatible);
+        assert!(assessment
+            .reasons
+            .iter()
+            .all(|r| !r.breaking && r.path == "type::Choice"));
     }
 
     #[test]

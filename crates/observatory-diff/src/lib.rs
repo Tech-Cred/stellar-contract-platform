@@ -18,6 +18,7 @@
 //! | Type removed | breaking |
 //! | Type renamed (identical shape) | breaking |
 //! | Type definition changed | breaking |
+//! | Union case added | breaking (policy-configurable) |
 //! | Type documentation only | informational |
 //! | Event added | non-breaking |
 //! | Event removed | breaking |
@@ -25,7 +26,7 @@
 //! | Event definition changed | breaking |
 
 use observatory_interface::ContractInterface;
-use observatory_spec::{SpecEvent, SpecFunction, SpecStruct, SpecType, SpecUnion};
+use observatory_spec::{SpecEvent, SpecFunction, SpecStruct, SpecType, SpecUnion, SpecUnionCase};
 use serde::{Deserialize, Serialize};
 
 /// Default severity assigned to a change.
@@ -61,6 +62,10 @@ pub enum ChangeKind {
     TypeRenamed,
     /// A type changed.
     TypeChanged,
+    /// One or more cases were added to an existing union without changing its
+    /// previous cases. Decoders that exhaustively match cases may reject the
+    /// new values.
+    UnionCaseAdded,
     /// An event was added.
     EventAdded,
     /// An event was removed.
@@ -82,11 +87,12 @@ impl ChangeKind {
             ChangeKind::TypeRemoved => 4,
             ChangeKind::TypeRenamed => 5,
             ChangeKind::TypeChanged => 6,
-            ChangeKind::TypeAdded => 7,
-            ChangeKind::EventRemoved => 8,
-            ChangeKind::EventRenamed => 9,
-            ChangeKind::EventChanged => 10,
-            ChangeKind::EventAdded => 11,
+            ChangeKind::UnionCaseAdded => 7,
+            ChangeKind::TypeAdded => 8,
+            ChangeKind::EventRemoved => 9,
+            ChangeKind::EventRenamed => 10,
+            ChangeKind::EventChanged => 11,
+            ChangeKind::EventAdded => 12,
         }
     }
 }
@@ -344,14 +350,28 @@ fn diff_types(old: &ContractInterface, new: &ContractInterface, out: &mut Vec<Ch
     for (name, old_entry) in &old_types {
         if let Some(new_entry) = new_types.get(name) {
             if old_entry.render != new_entry.render {
-                out.push(Change {
-                    kind: ChangeKind::TypeChanged,
-                    severity: Severity::Breaking,
-                    path: format!("type::{name}"),
-                    detail: format!("type `{name}` changed"),
-                    old: Some(old_entry.render.clone()),
-                    new: Some(new_entry.render.clone()),
-                });
+                if let Some(added) = union_case_additions(old, new, name) {
+                    out.push(Change {
+                        kind: ChangeKind::UnionCaseAdded,
+                        severity: Severity::Breaking,
+                        path: format!("type::{name}"),
+                        detail: format!(
+                            "union `{name}` added case(s): {}; decoders with exhaustive case handling may reject the new values",
+                            added.join(", ")
+                        ),
+                        old: Some(old_entry.render.clone()),
+                        new: Some(new_entry.render.clone()),
+                    });
+                } else {
+                    out.push(Change {
+                        kind: ChangeKind::TypeChanged,
+                        severity: Severity::Breaking,
+                        path: format!("type::{name}"),
+                        detail: format!("type `{name}` changed"),
+                        old: Some(old_entry.render.clone()),
+                        new: Some(new_entry.render.clone()),
+                    });
+                }
             }
         }
     }
@@ -648,6 +668,55 @@ fn union_shape_key(item: &SpecUnion) -> String {
         .collect::<Vec<_>>()
         .join("|");
     format!("union{{{cases}}}")
+}
+
+fn case_signature(case: &SpecUnionCase) -> String {
+    let types = case
+        .types
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}({types})", case.name)
+}
+
+/// Detect a strict union-case addition: every previous case keeps its name and
+/// operand types, and at least one new case appears. Other type edits remain
+/// [`ChangeKind::TypeChanged`].
+fn union_case_additions(
+    old: &ContractInterface,
+    new: &ContractInterface,
+    name: &str,
+) -> Option<Vec<String>> {
+    let old_union = old.unions.iter().find(|item| item.name == name)?;
+    let new_union = new.unions.iter().find(|item| item.name == name)?;
+    let old_cases: std::collections::BTreeMap<&str, String> = old_union
+        .cases
+        .iter()
+        .map(|case| (case.name.as_str(), case_signature(case)))
+        .collect();
+    let new_cases: std::collections::BTreeMap<&str, String> = new_union
+        .cases
+        .iter()
+        .map(|case| (case.name.as_str(), case_signature(case)))
+        .collect();
+    if new_cases.len() <= old_cases.len() {
+        return None;
+    }
+    if new_cases.iter().any(|(case_name, signature)| {
+        old_cases
+            .get(*case_name)
+            .is_some_and(|old_signature| old_signature != signature)
+    }) {
+        return None;
+    }
+    Some(
+        new_cases
+            .keys()
+            .filter(|case_name| !old_cases.contains_key(**case_name))
+            .map(|case_name| (*case_name).to_string())
+            .collect(),
+    )
 }
 
 fn enum_shape_key(kind: &str, cases: &[observatory_spec::SpecEnumCase]) -> String {
@@ -1381,6 +1450,37 @@ mod tests {
             ChangeKind::TypeChanged,
             Severity::Breaking,
             "type::Changed",
+        );
+    }
+
+    #[test]
+    fn change_kind_union_case_added() {
+        assert_single_change(
+            vec![spec_union("Choice", &[("A", None)])],
+            vec![spec_union(
+                "Choice",
+                &[("A", None), ("B", Some(vec![ScSpecTypeDef::U32]))],
+            )],
+            ChangeKind::UnionCaseAdded,
+            Severity::Breaking,
+            "type::Choice",
+        );
+    }
+
+    #[test]
+    fn changed_union_case_stays_type_changed() {
+        assert_single_change(
+            vec![spec_union(
+                "Choice",
+                &[("A", Some(vec![ScSpecTypeDef::U32]))],
+            )],
+            vec![spec_union(
+                "Choice",
+                &[("A", Some(vec![ScSpecTypeDef::U64]))],
+            )],
+            ChangeKind::TypeChanged,
+            Severity::Breaking,
+            "type::Choice",
         );
     }
 

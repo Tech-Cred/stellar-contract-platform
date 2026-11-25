@@ -42,6 +42,7 @@ function_removal_is_breaking: true
 signature_change_is_breaking: true
 type_removal_is_breaking: true
 type_change_is_breaking: true
+union_case_addition_is_breaking: true
 event_removal_is_breaking: true
 event_change_is_breaking: true
 ";
@@ -51,6 +52,7 @@ function_removal_is_breaking: false
 signature_change_is_breaking: false
 type_removal_is_breaking: false
 type_change_is_breaking: false
+union_case_addition_is_breaking: false
 event_removal_is_breaking: false
 event_change_is_breaking: false
 ";
@@ -103,6 +105,7 @@ event_change_is_breaking: false
                 "signature_change_is_breaking": false,
                 "type_removal_is_breaking": false,
                 "type_change_is_breaking": false,
+                "union_case_addition_is_breaking": false,
                 "event_removal_is_breaking": false,
                 "event_change_is_breaking": false
             }"#;
@@ -110,5 +113,13 @@ event_change_is_breaking: false
             parse_policy(json, ConfigFormat::Json).unwrap(),
             CompatibilityPolicy::lenient()
         );
+    }
+
+    #[test]
+    fn omitted_union_case_rule_defaults_to_strict() {
+        let old = STRICT_YAML.replace("union_case_addition_is_breaking: true\n", "");
+        let policy = parse_policy(&old, ConfigFormat::Yaml).unwrap();
+        assert!(policy.union_case_addition_is_breaking);
+        assert_eq!(policy, CompatibilityPolicy::strict());
     }
 }

@@ -20,6 +20,7 @@ with reasons. It is intentionally not a boolean.
 | Removing a type | incompatible | note |
 | Renaming a type (identical shape) | incompatible | note |
 | Changing a type definition | incompatible | note |
+| Adding a case to a union | incompatible | note |
 | Removing an event | incompatible | note |
 | Renaming an event (identical shape) | incompatible | note |
 | Changing an event | incompatible | note |
@@ -29,18 +30,27 @@ with reasons. It is intentionally not a boolean.
 Relaxing a rule does **not** hide the change: it is reported as a non-breaking
 note with its path and explanation.
 
+A union case addition keeps every previous case and adds at least one new one.
+It is classified as `union_case_added`, not as a generic `type_changed`, so the
+flag above changes only this case. It stays strict by default because decoders
+that exhaustively handle union cases may reject the new values. Any other type
+edit still follows `type_change_is_breaking`.
+
 ## Policy document
 
 `--policy-file <FILE>` loads the rules from a document instead of a preset. The
 format follows the configuration conventions and is inferred from the extension:
-`.yml`, `.yaml`, `.toml`, or `.json`. Every rule is required, and unknown fields
-are rejected:
+`.yml`, `.yaml`, `.toml`, or `.json`. Every rule should be stated explicitly, and
+unknown fields are rejected. `union_case_addition_is_breaking` defaults to `true`
+when omitted so documents written before that rule was added keep the strict
+default:
 
 ```yaml
 function_removal_is_breaking: true
 signature_change_is_breaking: true
 type_removal_is_breaking: true
 type_change_is_breaking: true
+union_case_addition_is_breaking: true
 event_removal_is_breaking: true
 event_change_is_breaking: true
 ```
@@ -52,6 +62,7 @@ function_removal_is_breaking = false
 signature_change_is_breaking = false
 type_removal_is_breaking = false
 type_change_is_breaking = false
+union_case_addition_is_breaking = false
 event_removal_is_breaking = false
 event_change_is_breaking = false
 ```
@@ -61,10 +72,10 @@ A document that sets every rule to `true` is equivalent to
 `--policy lenient`. The presets keep working. `--policy` and `--policy-file`
 cannot be used together.
 
-An unknown field, a missing field, or a non-boolean value is an invalid-policy
-error (exit code `2`) whose message names the field. The JSON report echoes the
-resolved rules in its `policy` object, so a reviewer can see exactly what was
-applied.
+An unknown field, a missing required field, or a non-boolean value is an
+invalid-policy error (exit code `2`) whose message names the field. The JSON
+report echoes the resolved rules in its `policy` object, so a reviewer can see
+exactly what was applied.
 
 ## Why a policy
 
