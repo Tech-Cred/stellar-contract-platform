@@ -20,6 +20,17 @@
         "last_modified_ledger_seq": { "type": ["integer", "null"], "minimum": 0 },
         "live_until_ledger_seq": { "type": ["integer", "null"], "minimum": 0 },
         "found": { "type": "boolean" },
+        "network": {
+          "type": "object",
+          "description": "The resolved network profile, present when the lookup was made on a named network.",
+          "additionalProperties": false,
+          "required": ["network", "passphrase", "default_rpc_url"],
+          "properties": {
+            "network": { "enum": ["public", "testnet", "futurenet"] },
+            "passphrase": { "type": "string" },
+            "default_rpc_url": { "type": "string" }
+          }
+        },
         "storage": {
           "type": ["object", "null"],
           "description": "Bounded summary of the instance storage map. Keys and values are never included.",
