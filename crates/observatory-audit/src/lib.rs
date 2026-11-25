@@ -31,25 +31,75 @@ pub enum AuditStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum FindingSeverity {
-    /// A non-fatal issue.
+    /// A potential issue that does not block every workflow.
     Warn,
-    /// A definite inconsistency.
+    /// A high-confidence structural inconsistency.
     Error,
 }
 
+/// How certain the heuristic is about a reported potential issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum FindingConfidence {
+    /// Directly observable from the interface or artifact.
+    High,
+    /// Supported by the available evidence but worth reviewing.
+    Medium,
+    /// A heuristic signal; no conclusion should be drawn from it alone.
+    Low,
+}
+
 /// A single audit finding.
+///
+/// Findings describe **potential issues** only. They are bounded structural
+/// heuristics and never claim a confirmed vulnerability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     /// Stable rule id, for example `interface.empty-name`.
     pub id: String,
     /// Severity.
     pub severity: FindingSeverity,
-    /// Human-readable explanation.
+    /// Human-readable explanation of the potential issue.
     pub message: String,
     /// Optional stable path.
     pub path: Option<String>,
     /// Whether the rule is experimental.
     pub experimental: bool,
+    /// Confidence in the heuristic result.
+    pub confidence: FindingConfidence,
+    /// Bounded observations backing the finding (at most two entries).
+    pub evidence: Vec<String>,
+    /// Non-prescriptive next step for reviewing the potential issue.
+    pub recommendation: String,
+}
+
+impl Finding {
+    /// Fill confidence, evidence, and recommendation from the rule guidance.
+    fn with_guidance(mut self) -> Self {
+        let (confidence, recommendation) = guidance_for(&self.id);
+        self.confidence = confidence;
+        self.recommendation = recommendation.to_string();
+        let observed = self.message.clone();
+        self.evidence = vec![observed.clone()];
+        if let Some(path) = &self.path {
+            self.evidence.push(format!("Observed at {path}"));
+        }
+        self.message = format!("Potential issue: {observed}");
+        self
+    }
+}
+
+/// Construct a finding and populate its guidance fields in one step.
+macro_rules! finding {
+    ($($field:ident : $value:expr),* $(,)?) => {{
+        let base = Finding {
+            $($field: $value,)*
+            confidence: FindingConfidence::Medium,
+            evidence: Vec::new(),
+            recommendation: String::new(),
+        };
+        base.with_guidance()
+    }};
 }
 
 /// The result of running heuristics.
@@ -327,11 +377,157 @@ const RULE_DESCRIPTIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Confidence and review guidance for every registered rule id.
+///
+/// Sorted by rule id like [`RULE_IDS`]; a test keeps the three lists in sync.
+/// Guidance is intentionally non-prescriptive: findings flag potential issues
+/// and never claim a confirmed vulnerability.
+const RULE_GUIDANCE: &[(&str, FindingConfidence, &str)] = &[
+    (
+        "artifact.duplicate-metadata-section",
+        FindingConfidence::Medium,
+        "Remove duplicate Soroban metadata sections so decoders see one definition.",
+    ),
+    (
+        "artifact.memory64",
+        FindingConfidence::High,
+        "Rebuild for 32-bit linear memory before targeting Soroban.",
+    ),
+    (
+        "artifact.metadata-without-code",
+        FindingConfidence::High,
+        "Include executable code or remove the metadata section.",
+    ),
+    (
+        "artifact.metadata-without-contract-spec",
+        FindingConfidence::Medium,
+        "Add a `contractspecv0` section or remove the metadata section.",
+    ),
+    (
+        "artifact.no-code",
+        FindingConfidence::High,
+        "Include a code section or verify this is the intended artifact.",
+    ),
+    (
+        "artifact.no-contract-spec",
+        FindingConfidence::Medium,
+        "Add a `contractspecv0` section when deploying a Soroban contract.",
+    ),
+    (
+        "artifact.no-memory",
+        FindingConfidence::Medium,
+        "Declare linear memory if the contract needs it.",
+    ),
+    (
+        "artifact.oversized-spec",
+        FindingConfidence::Low,
+        "Review the specification size and split oversized metadata where possible.",
+    ),
+    (
+        "artifact.truncated-report",
+        FindingConfidence::Medium,
+        "Inspect with higher limits or a smaller artifact to see the complete listing.",
+    ),
+    (
+        "event.too-many-prefix-topics",
+        FindingConfidence::High,
+        "Reduce prefix topics to at most two.",
+    ),
+    (
+        "function.duplicate-param",
+        FindingConfidence::Medium,
+        "Rename duplicate parameters so callers can distinguish them.",
+    ),
+    (
+        "function.empty-name",
+        FindingConfidence::High,
+        "Give the function a non-empty name.",
+    ),
+    (
+        "function.unknown-type",
+        FindingConfidence::High,
+        "Check the referenced type name and declare it in the interface.",
+    ),
+    (
+        "interface.duplicate-event",
+        FindingConfidence::High,
+        "Remove or rename the duplicate event declaration.",
+    ),
+    (
+        "interface.duplicate-function",
+        FindingConfidence::High,
+        "Remove or rename the duplicate function declaration.",
+    ),
+    (
+        "interface.duplicate-type",
+        FindingConfidence::High,
+        "Remove or rename the duplicate type declaration.",
+    ),
+    (
+        "interface.empty",
+        FindingConfidence::Medium,
+        "Declare at least one public entity or remove the empty interface.",
+    ),
+    (
+        "interface.no-functions",
+        FindingConfidence::Low,
+        "Add a function when the interface needs callable entry points.",
+    ),
+    (
+        "naming.mixed-script",
+        FindingConfidence::Low,
+        "Use a consistent script or escape ambiguous characters.",
+    ),
+    (
+        "naming.zero-width",
+        FindingConfidence::Low,
+        "Remove zero-width or control characters from names.",
+    ),
+    (
+        "spec.error",
+        FindingConfidence::High,
+        "Address the specification error before publishing the interface.",
+    ),
+    (
+        "spec.info",
+        FindingConfidence::Low,
+        "Review the informational specification note; no change may be required.",
+    ),
+    (
+        "spec.warning",
+        FindingConfidence::Medium,
+        "Review the specification warning and update the interface if needed.",
+    ),
+    (
+        "type.duplicate-case",
+        FindingConfidence::Medium,
+        "Rename duplicate cases so decoders can distinguish them.",
+    ),
+    (
+        "type.duplicate-field",
+        FindingConfidence::Medium,
+        "Rename duplicate fields so decoders can distinguish them.",
+    ),
+];
+
 fn rule_description(id: &str) -> &'static str {
     RULE_DESCRIPTIONS
         .iter()
         .find(|(rule, _)| *rule == id)
         .map_or("Audit rule", |(_, description)| description)
+}
+
+fn guidance_for(id: &str) -> (FindingConfidence, &'static str) {
+    RULE_GUIDANCE
+        .iter()
+        .find(|(rule, _, _)| *rule == id)
+        .map_or(
+            (
+                FindingConfidence::Medium,
+                "Review the reported interface or artifact details.",
+            ),
+            |(_, confidence, recommendation)| (*confidence, *recommendation),
+        )
 }
 
 /// Map an audit severity to a SARIF result level.
@@ -377,6 +573,11 @@ pub fn to_sarif(report: &AuditReport) -> serde_json::Value {
                 "ruleId": finding.id,
                 "level": sarif_level(finding.severity),
                 "message": { "text": finding.message },
+                "properties": {
+                    "confidence": finding.confidence,
+                    "evidence": &finding.evidence,
+                    "recommendation": &finding.recommendation,
+                },
             });
             if let Some(path) = &finding.path {
                 result["locations"] = serde_json::json!([
@@ -562,7 +763,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
     let mut findings = Vec::new();
 
     for issue in observatory_spec::validate(&interface.to_spec()) {
-        findings.push(Finding {
+        findings.push(finding! {
             id: format!(
                 "spec.{}",
                 match issue.severity {
@@ -583,7 +784,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
     }
 
     if interface.functions.is_empty() && !interface.is_empty() {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "interface.no-functions".to_string(),
             severity: FindingSeverity::Warn,
             message: "interface declares types or events but no functions".to_string(),
@@ -593,7 +794,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
     }
 
     if interface.functions.is_empty() && interface.is_empty() {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "interface.empty".to_string(),
             severity: FindingSeverity::Warn,
             message: "interface declares no public entities".to_string(),
@@ -604,7 +805,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
 
     for function in &interface.functions {
         if function.name.trim().is_empty() {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "function.empty-name".to_string(),
                 severity: FindingSeverity::Error,
                 message: "a function has an empty name".to_string(),
@@ -620,7 +821,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
         names.sort_unstable();
         for pair in names.windows(2) {
             if !pair[0].is_empty() && pair[0] == pair[1] {
-                findings.push(Finding {
+                findings.push(finding! {
                     id: "function.duplicate-param".to_string(),
                     severity: FindingSeverity::Warn,
                     message: format!(
@@ -634,7 +835,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
         }
         for input in &function.inputs {
             if references_unknown(interface, &input.ty) {
-                findings.push(Finding {
+                findings.push(finding! {
                     id: "function.unknown-type".to_string(),
                     severity: FindingSeverity::Error,
                     message: format!(
@@ -650,7 +851,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
 
     for event in &interface.events {
         if event.prefix_topics.len() > 2 {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "event.too-many-prefix-topics".to_string(),
                 severity: FindingSeverity::Error,
                 message: format!(
@@ -665,7 +866,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
     }
 
     for name in duplicate_names(interface.functions.iter().map(|item| item.name.as_str())) {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "interface.duplicate-function".to_string(),
             severity: FindingSeverity::Error,
             message: format!("function `{name}` is declared more than once"),
@@ -682,7 +883,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
             .chain(interface.enums.iter().map(|item| item.name.as_str()))
             .chain(interface.error_enums.iter().map(|item| item.name.as_str())),
     ) {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "interface.duplicate-type".to_string(),
             severity: FindingSeverity::Error,
             message: format!("type `{name}` is declared more than once"),
@@ -691,7 +892,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
         });
     }
     for name in duplicate_names(interface.events.iter().map(|item| item.name.as_str())) {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "interface.duplicate-event".to_string(),
             severity: FindingSeverity::Error,
             message: format!("event `{name}` is declared more than once"),
@@ -702,7 +903,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
 
     for item in &interface.structs {
         for name in duplicate_names(item.fields.iter().map(|field| field.name.as_str())) {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "type.duplicate-field".to_string(),
                 severity: FindingSeverity::Warn,
                 message: format!(
@@ -716,7 +917,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
     }
     for item in &interface.unions {
         for name in duplicate_names(item.cases.iter().map(|case| case.name.as_str())) {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "type.duplicate-case".to_string(),
                 severity: FindingSeverity::Warn,
                 message: format!(
@@ -740,7 +941,7 @@ pub fn audit_interface(interface: &ContractInterface) -> AuditReport {
         )
     {
         for name in duplicate_names(item.1.iter().map(|case| case.name.as_str())) {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "type.duplicate-case".to_string(),
                 severity: FindingSeverity::Warn,
                 message: format!("enum `{}` declares case `{name}` more than once", item.0),
@@ -803,7 +1004,7 @@ fn naming_findings(interface: &ContractInterface) -> Vec<Finding> {
         }
         let path = format!("{kind}::{name}");
         if has_zero_width(name) {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "naming.zero-width".to_string(),
                 severity: FindingSeverity::Warn,
                 message: format!("name `{name}` contains zero-width or control characters"),
@@ -812,7 +1013,7 @@ fn naming_findings(interface: &ContractInterface) -> Vec<Finding> {
             });
         }
         if has_mixed_script(name) {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "naming.mixed-script".to_string(),
                 severity: FindingSeverity::Warn,
                 message: format!(
@@ -873,7 +1074,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
     let mut findings = Vec::new();
 
     if report.code_section_bytes == 0 {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "artifact.no-code".to_string(),
             severity: FindingSeverity::Warn,
             message: "module contains no code section".to_string(),
@@ -882,7 +1083,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
         });
     }
     if !report.has_contract_spec {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "artifact.no-contract-spec".to_string(),
             severity: FindingSeverity::Warn,
             message: "module has no `contractspecv0` section; it may not be a Soroban contract"
@@ -892,7 +1093,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
         });
     }
     if report.truncated {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "artifact.truncated-report".to_string(),
             severity: FindingSeverity::Warn,
             message: "import, export, or custom-section listing was truncated by limits"
@@ -902,7 +1103,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
         });
     }
     if report.memories.is_empty() {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "artifact.no-memory".to_string(),
             severity: FindingSeverity::Warn,
             message: "module declares no linear memory".to_string(),
@@ -911,7 +1112,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
         });
     }
     if report.memories.iter().any(|memory| memory.memory64) {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "artifact.memory64".to_string(),
             severity: FindingSeverity::Warn,
             message: "module declares a 64-bit memory (memory64 proposal); Soroban \
@@ -923,7 +1124,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
     }
     if let Some(spec_bytes) = report.contract_spec_bytes {
         if spec_bytes > 4 * 1024 * 1024 {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "artifact.oversized-spec".to_string(),
                 severity: FindingSeverity::Warn,
                 message: format!(
@@ -944,7 +1145,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
         .map(|section| section.name.as_str())
         .collect();
     if !metadata_sections.is_empty() && !report.has_contract_spec {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "artifact.metadata-without-contract-spec".to_string(),
             severity: FindingSeverity::Warn,
             message: "module carries Soroban metadata but no `contractspecv0` section".to_string(),
@@ -953,7 +1154,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
         });
     }
     if !metadata_sections.is_empty() && report.code_section_bytes == 0 {
-        findings.push(Finding {
+        findings.push(finding! {
             id: "artifact.metadata-without-code".to_string(),
             severity: FindingSeverity::Warn,
             message: "module carries Soroban metadata but no code section".to_string(),
@@ -965,7 +1166,7 @@ pub fn audit_artifact(report: &WasmReport) -> AuditReport {
     let mut seen_sections = BTreeSet::new();
     for name in metadata_sections {
         if !seen_sections.insert(name) && reported_sections.insert(name) {
-            findings.push(Finding {
+            findings.push(finding! {
                 id: "artifact.duplicate-metadata-section".to_string(),
                 severity: FindingSeverity::Warn,
                 message: format!("custom section `{name}` is declared more than once"),
@@ -1333,10 +1534,10 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    fn finding(id: &str, path: Option<&str>, severity: FindingSeverity) -> Finding {
-        Finding {
+    fn finding(id: &str, path: Option<&str>, level: FindingSeverity) -> Finding {
+        finding! {
             id: id.to_string(),
-            severity,
+            severity: level,
             message: "test finding".to_string(),
             path: path.map(str::to_string),
             experimental: false,
@@ -1665,7 +1866,7 @@ mod tests {
         }
 
         let default = AuditConfig::default();
-        let report = default.apply(AuditReport::from_findings(vec![Finding {
+        let report = default.apply(AuditReport::from_findings(vec![finding! {
             id: "naming.mixed-script".to_string(),
             severity: FindingSeverity::Warn,
             message: "test".to_string(),
@@ -1688,6 +1889,49 @@ mod tests {
         for (id, description) in RULE_DESCRIPTIONS {
             assert!(!description.trim().is_empty(), "empty description for {id}");
         }
+    }
+
+    #[test]
+    fn every_rule_has_confidence_and_recommendation() {
+        let ids: Vec<&str> = RULE_GUIDANCE.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ids, RULE_IDS);
+        for (id, _, recommendation) in RULE_GUIDANCE {
+            assert!(!recommendation.trim().is_empty(), "empty guidance for {id}");
+            let item = finding! {
+                id: (*id).to_string(),
+                severity: FindingSeverity::Warn,
+                message: "observed value".to_string(),
+                path: None,
+                experimental: false,
+            };
+            assert!(item.message.starts_with("Potential issue:"));
+            assert_eq!(item.recommendation, *recommendation);
+            assert_eq!(item.evidence, vec!["observed value".to_string()]);
+            assert!(!item.message.contains("confirmed vulnerability"));
+        }
+    }
+
+    #[test]
+    fn emitted_findings_carry_bounded_evidence() {
+        let reports = vec![
+            audit_interface(&interface(vec![
+                spec_function("", &[("x", ty_udt("Missing"))], None),
+                spec_function("a", &[], None),
+                spec_function("a", &[], None),
+            ])),
+            audit_artifact(&observatory_wasm::inspect(&minimal_module()).unwrap()),
+        ];
+        let mut checked = 0;
+        for report in reports {
+            for item in &report.findings {
+                checked += 1;
+                assert!(item.message.starts_with("Potential issue:"));
+                assert!((1..=2).contains(&item.evidence.len()));
+                assert!(!item.recommendation.trim().is_empty());
+                assert!(RULE_GUIDANCE.iter().any(|(id, _, _)| *id == item.id));
+            }
+        }
+        assert!(checked > 0, "fixtures should produce findings");
     }
 
     #[test]

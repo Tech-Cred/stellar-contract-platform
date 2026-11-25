@@ -204,12 +204,19 @@ export interface ContractInterface {
 
 export type AuditStatus = "PASS" | "WARN" | "ERROR";
 
+export type FindingConfidence = "HIGH" | "MEDIUM" | "LOW";
+
 export interface Finding {
   id: string;
   severity: "WARN" | "ERROR";
   message: string;
   path: string | null;
   experimental: boolean;
+  confidence: FindingConfidence;
+  /** Bounded observations backing the potential issue (one or two entries). */
+  evidence: string[];
+  /** Non-prescriptive next step for reviewing the potential issue. */
+  recommendation: string;
 }
 
 export interface AuditReport {

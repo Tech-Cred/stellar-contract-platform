@@ -60,6 +60,36 @@ checks report each duplicated name once.
 
 Rules marked `experimental` may change. Heuristic ids are stable for CI.
 
+### Finding JSON
+
+Every finding in the security report carries the same bounded shape:
+
+```json
+{
+  "id": "artifact.no-code",
+  "severity": "WARN",
+  "message": "Potential issue: module contains no code section",
+  "path": null,
+  "experimental": false,
+  "confidence": "HIGH",
+  "evidence": ["module contains no code section"],
+  "recommendation": "Include a code section or verify this is the intended artifact."
+}
+```
+
+- `message` always begins with `Potential issue:`. Findings describe observations
+  and never claim a confirmed vulnerability.
+- `confidence` is `HIGH`, `MEDIUM`, or `LOW`. It reflects how directly the
+  heuristic result follows from the parsed input, not a security verdict.
+- `evidence` has one or two strings: the observation and, when available, the
+  stable path where it was seen. The list is bounded to keep reports readable.
+- `recommendation` is a non-prescriptive review step. It does not guarantee that
+  a change is required.
+
+The full machine-readable contract is
+[`docs/schemas/security.schema.json`](schemas/security.schema.json). SARIF output
+includes the same three fields in each result's `properties` object.
+
 ### Configuration
 
 `inspect --security` reads the `audit` block from the project configuration:

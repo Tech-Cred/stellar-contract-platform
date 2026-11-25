@@ -26,13 +26,37 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["id", "severity", "message", "path", "experimental"],
+            "required": [
+              "id",
+              "severity",
+              "message",
+              "path",
+              "experimental",
+              "confidence",
+              "evidence",
+              "recommendation"
+            ],
             "properties": {
               "id": { "type": "string" },
               "severity": { "enum": ["WARN", "ERROR"] },
-              "message": { "type": "string" },
+              "message": {
+                "type": "string",
+                "description": "Non-accusatory description prefixed with 'Potential issue:'."
+              },
               "path": { "type": ["string", "null"] },
-              "experimental": { "type": "boolean" }
+              "experimental": { "type": "boolean" },
+              "confidence": { "enum": ["HIGH", "MEDIUM", "LOW"] },
+              "evidence": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "items": { "type": "string" },
+                "description": "Bounded observations backing the potential issue."
+              },
+              "recommendation": {
+                "type": "string",
+                "description": "Non-prescriptive next step for reviewing the potential issue."
+              }
             }
           }
         }
