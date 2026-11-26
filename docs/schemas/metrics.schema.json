@@ -13,12 +13,37 @@
     "data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["requests_total", "analyses_total", "errors_total", "rate_limited_total"],
+      "required": [
+        "requests_total",
+        "analyses_total",
+        "errors_total",
+        "rate_limited_total",
+        "auth_failures",
+        "rate_limit_rejections"
+      ],
       "properties": {
         "requests_total": { "type": "integer", "minimum": 0 },
         "analyses_total": { "type": "integer", "minimum": 0 },
         "errors_total": { "type": "integer", "minimum": 0 },
-        "rate_limited_total": { "type": "integer", "minimum": 0 }
+        "rate_limited_total": { "type": "integer", "minimum": 0 },
+        "auth_failures": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["missing_key", "invalid_key", "insufficient_permission"],
+          "properties": {
+            "missing_key": { "type": "integer", "minimum": 0 },
+            "invalid_key": { "type": "integer", "minimum": 0 },
+            "insufficient_permission": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "rate_limit_rejections": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["window_exceeded"],
+          "properties": {
+            "window_exceeded": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     }
   }

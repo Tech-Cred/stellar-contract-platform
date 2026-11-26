@@ -15,8 +15,8 @@ use observatory_core::{ObservatoryError, Result as CoreResult, SCHEMA_VERSION, T
 use observatory_output::report;
 use observatory_platform::{
     authorize_with_scopes, validate_scopes, ApiKeyRecord, ApiKeyStore, AuditEvent, AuditLog,
-    CompatibilityPolicy, JobQueue, KeyStore, Observatory, Permission, PlatformConfig, Principal,
-    RateLimiter, Role, WebhookEvent, WebhookStore,
+    AuthFailureReason, CompatibilityPolicy, JobQueue, KeyStore, Observatory, Permission,
+    PlatformConfig, Principal, RateLimitReason, RateLimiter, Role, WebhookEvent, WebhookStore,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -195,6 +195,31 @@ impl ApiError {
 impl From<ObservatoryError> for ApiError {
     fn from(error: ObservatoryError) -> Self {
         ApiError::new(error.code().as_str(), error.to_string())
+    }
+}
+
+/// The authentication state for one request.
+///
+/// The failure reason is carried alongside the absent principal so it is only
+/// counted when a route actually requires authentication. The reason is a
+/// fixed enum, so no supplied credential can be retained by the metrics layer.
+#[derive(Debug)]
+struct AuthContext {
+    principal: Option<Principal>,
+    failure: Option<AuthFailureReason>,
+}
+
+impl AuthContext {
+    fn principal(&self) -> Option<&Principal> {
+        self.principal.as_ref()
+    }
+
+    fn key_id(&self) -> Option<&str> {
+        self.principal().map(|principal| principal.key_id.as_str())
+    }
+
+    fn failure_reason(&self) -> AuthFailureReason {
+        self.failure.unwrap_or(AuthFailureReason::MissingKey)
     }
 }
 
@@ -383,22 +408,24 @@ impl Api {
             self.counter.fetch_add(1, Ordering::Relaxed) + 1
         );
         self.metrics.record_request();
-        let principal = self.principal(request);
-        let rate_key = principal
-            .as_ref()
-            .map(|principal| principal.key_id.clone())
+        let auth = self.principal(request);
+        let rate_key = auth
+            .key_id()
+            .map(str::to_string)
             .unwrap_or_else(|| format!("client:{client_id}"));
         // Each route keeps its own window so a strict analysis limit cannot
         // starve cheap health checks for the same caller.
         let route_key = format!("{rate_key}|{}", request.path);
         let limit = self.config.rate_limit_for(&request.path);
         let decision = self.limiter.check_with(limit, &route_key, now_secs);
-        let actor = principal.as_ref().map(|principal| principal.key_id.clone());
+        let actor = auth.key_id().map(str::to_string);
         let idempotency_owner = actor
             .clone()
             .unwrap_or_else(|| format!("client:{client_id}"));
 
         if !decision.allowed {
+            self.metrics
+                .record_rate_limit_rejection(RateLimitReason::WindowExceeded);
             self.record_audit(
                 actor.clone(),
                 "request.rate_limited",
@@ -419,13 +446,7 @@ impl Api {
                 "Accept must allow a supported response media type",
             ))
         } else {
-            match self.dispatch(
-                request,
-                principal.as_ref(),
-                now_secs,
-                &request_id,
-                &idempotency_owner,
-            ) {
+            match self.dispatch(request, &auth, now_secs, &request_id, &idempotency_owner) {
                 Ok(response) => response,
                 Err(error) => error_response(&error),
             }
@@ -491,13 +512,13 @@ impl Api {
     fn dispatch(
         &self,
         request: &Request,
-        principal: Option<&Principal>,
+        auth: &AuthContext,
         now_secs: u64,
         request_id: &str,
         owner: &str,
     ) -> Result<Response, ApiError> {
         let Some((scope, fingerprint)) = self.idempotency_scope(request, owner)? else {
-            return self.route(request, principal, now_secs, request_id);
+            return self.route(request, auth, now_secs, request_id);
         };
 
         let lookup = self
@@ -514,7 +535,7 @@ impl Api {
                 "Idempotency-Key was already used for a different request",
             )),
             IdempotencyLookup::Miss => {
-                let response = self.route(request, principal, now_secs, request_id)?;
+                let response = self.route(request, auth, now_secs, request_id)?;
                 // Only successful work is cached; a retry of a failure should
                 // be able to succeed once the cause is fixed.
                 if (200..300).contains(&response.status) {
@@ -607,32 +628,45 @@ impl Api {
         headers
     }
 
-    fn principal(&self, request: &Request) -> Option<Principal> {
-        let provided = request
-            .header("x-api-key")
-            .map(str::to_string)
-            .or_else(|| {
-                request
-                    .header("authorization")
-                    .and_then(|value| value.strip_prefix("Bearer "))
-                    .map(str::to_string)
-            })?;
+    fn principal(&self, request: &Request) -> AuthContext {
+        let provided = request.header("x-api-key").map(str::to_string).or_else(|| {
+            request
+                .header("authorization")
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::to_string)
+        });
+        let Some(provided) = provided else {
+            return AuthContext {
+                principal: None,
+                failure: self
+                    .config
+                    .require_auth
+                    .then_some(AuthFailureReason::MissingKey),
+            };
+        };
         let keys = self.keys.read().expect("key store poisoned");
-        keys.authenticate(&provided)
+        let principal = keys.authenticate(&provided);
+        let failure = if principal.is_none() && self.config.require_auth {
+            Some(AuthFailureReason::InvalidKey)
+        } else {
+            None
+        };
+        AuthContext { principal, failure }
     }
 
-    fn require(
-        &self,
-        principal: Option<&Principal>,
-        permission: Permission,
-    ) -> Result<(), ApiError> {
+    fn require(&self, auth: &AuthContext, permission: Permission) -> Result<(), ApiError> {
         if !self.config.require_auth {
             return Ok(());
         }
-        let principal = principal.ok_or_else(ApiError::unauthorized)?;
+        let Some(principal) = auth.principal() else {
+            self.metrics.record_auth_failure(auth.failure_reason());
+            return Err(ApiError::unauthorized());
+        };
         if authorize_with_scopes(principal.role, principal.scopes.as_deref(), permission) {
             Ok(())
         } else {
+            self.metrics
+                .record_auth_failure(AuthFailureReason::InsufficientPermission);
             Err(ApiError::forbidden())
         }
     }
@@ -640,16 +674,16 @@ impl Api {
     fn route(
         &self,
         request: &Request,
-        principal: Option<&Principal>,
+        auth: &AuthContext,
         now_secs: u64,
         request_id: &str,
     ) -> Result<Response, ApiError> {
-        let actor = principal.map(|principal| principal.key_id.clone());
+        let actor = auth.key_id().map(str::to_string);
         if request.path == "/api/v1/webhooks" {
-            return self.route_webhooks(request, principal);
+            return self.route_webhooks(request, auth);
         }
         if let Some(id) = request.path.strip_prefix("/api/v1/webhooks/") {
-            return self.route_webhook_item(request, principal, id);
+            return self.route_webhook_item(request, auth, id);
         }
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/api/v1/health") => Ok(response(
@@ -681,7 +715,7 @@ impl Api {
                 &serde_json::json!({ "errors": crate::errors::ERROR_CATALOG }),
             )),
             ("POST", "/api/v1/keys") => {
-                self.require(principal, Permission::ManageKeys)?;
+                self.require(auth, Permission::ManageKeys)?;
                 let body: CreateKeyRequest = parse_json(request)?;
                 if body.label.trim().is_empty() {
                     return Err(ApiError::bad_request("label must not be empty"));
@@ -707,13 +741,13 @@ impl Api {
                 ))
             }
             ("GET", "/api/v1/keys") => {
-                self.require(principal, Permission::ManageKeys)?;
+                self.require(auth, Permission::ManageKeys)?;
                 let page_request = PageRequest::parse(request)?;
                 let page = page_of(self.list_keys(), page_request.skip, page_request.limit);
                 Ok(response(200, "api_keys", &page))
             }
             ("DELETE", path) if path.starts_with("/api/v1/keys/") => {
-                self.require(principal, Permission::ManageKeys)?;
+                self.require(auth, Permission::ManageKeys)?;
                 let id = path.trim_start_matches("/api/v1/keys/");
                 if id.is_empty() || id.contains('/') {
                     return Err(ApiError::not_found("unknown API key"));
@@ -741,7 +775,7 @@ impl Api {
                 }
             }
             ("POST", "/api/v1/contracts/inspect") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: InspectRequest = parse_json(request)?;
                 let wasm = decode_wasm(&body.wasm_base64).map_err(ApiError::from)?;
                 let outcome = self
@@ -751,14 +785,14 @@ impl Api {
                 Ok(response(200, "inspect", &outcome))
             }
             ("POST", "/api/v1/contracts/spec") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: WasmRequest = parse_json(request)?;
                 let wasm = decode_wasm(&body.wasm_base64).map_err(ApiError::from)?;
                 let outcome = self.observatory.spec(&wasm).map_err(ApiError::from)?;
                 Ok(response(200, "spec", &outcome))
             }
             ("POST", "/api/v1/contracts/diff") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: DiffRequest = parse_json(request)?;
                 let old = decode_wasm(&body.old_wasm_base64).map_err(ApiError::from)?;
                 let new = decode_wasm(&body.new_wasm_base64).map_err(ApiError::from)?;
@@ -766,7 +800,7 @@ impl Api {
                 Ok(response(200, "diff", &outcome))
             }
             ("POST", "/api/v1/contracts/compatibility") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: CompatibilityRequest = parse_json(request)?;
                 let policy = match body.policy.as_str() {
                     "strict" => CompatibilityPolicy::strict(),
@@ -787,7 +821,7 @@ impl Api {
                 Ok(response(200, "compat", &outcome))
             }
             ("POST", "/api/v1/contracts/fingerprint") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: WasmRequest = parse_json(request)?;
                 let wasm = decode_wasm(&body.wasm_base64).map_err(ApiError::from)?;
                 let outcome = self
@@ -797,14 +831,14 @@ impl Api {
                 Ok(response(200, "fingerprint", &outcome))
             }
             ("POST", "/api/v1/contracts/security") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: WasmRequest = parse_json(request)?;
                 let wasm = decode_wasm(&body.wasm_base64).map_err(ApiError::from)?;
                 let outcome = self.observatory.security(&wasm).map_err(ApiError::from)?;
                 Ok(response(200, "security", &outcome))
             }
             ("POST", "/api/v1/contracts/events") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: EventsRequest = parse_json(request)?;
                 let limit = body.limit.unwrap_or(100);
                 if limit == 0 || limit > MAX_EVENT_RESULTS {
@@ -825,7 +859,7 @@ impl Api {
                 Ok(response(200, "events", &events))
             }
             ("POST", "/api/v1/jobs") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: CreateJobRequest = parse_json(request)?;
                 let job = self
                     .jobs
@@ -849,7 +883,7 @@ impl Api {
                 Ok(response(201, "job", &job))
             }
             ("GET", "/api/v1/jobs") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let queue = self.jobs.read().expect("job queue poisoned");
                 if let Some(id) = query_value(request, "id") {
                     match queue.job(id) {
@@ -863,7 +897,7 @@ impl Api {
                 }
             }
             ("POST", "/api/v1/jobs/cancel") => {
-                self.require(principal, Permission::RunAnalysis)?;
+                self.require(auth, Permission::RunAnalysis)?;
                 let body: CancelJobRequest = parse_json(request)?;
                 let cancelled = self
                     .jobs
@@ -888,7 +922,7 @@ impl Api {
                 ))
             }
             ("GET", "/api/v1/audit/events") => {
-                self.require(principal, Permission::ManageKeys)?;
+                self.require(auth, Permission::ManageKeys)?;
                 let page_request = PageRequest::parse(request)?;
                 let page = page_of(
                     self.redacted_audit_events(),
@@ -911,12 +945,8 @@ impl Api {
         }
     }
 
-    fn route_webhooks(
-        &self,
-        request: &Request,
-        principal: Option<&Principal>,
-    ) -> Result<Response, ApiError> {
-        self.require(principal, Permission::ManageWebhooks)?;
+    fn route_webhooks(&self, request: &Request, auth: &AuthContext) -> Result<Response, ApiError> {
+        self.require(auth, Permission::ManageWebhooks)?;
         match request.method.as_str() {
             "POST" => {
                 let body: CreateWebhookRequest = parse_json(request)?;
@@ -942,13 +972,13 @@ impl Api {
     fn route_webhook_item(
         &self,
         request: &Request,
-        principal: Option<&Principal>,
+        auth: &AuthContext,
         id: &str,
     ) -> Result<Response, ApiError> {
         if id.is_empty() || id.contains('/') {
             return Err(webhook_not_found());
         }
-        self.require(principal, Permission::ManageWebhooks)?;
+        self.require(auth, Permission::ManageWebhooks)?;
         match request.method.as_str() {
             "GET" => {
                 let subscription = self
@@ -1576,6 +1606,79 @@ mod tests {
         let text = String::from_utf8(api.handle(&get(METRICS_PATH), "ip", 0).body).unwrap();
         assert!(!text.contains(&key));
         assert!(!text.contains("sco_"));
+    }
+
+    #[test]
+    fn authentication_failures_increment_reason_counters() {
+        let api = Api::new(PlatformConfig::default());
+        let body = serde_json::json!({ "kind": "analysis" });
+        assert_eq!(
+            api.handle(&post("/api/v1/jobs", body.clone()), "ip", 0)
+                .status,
+            401
+        );
+        assert_eq!(
+            api.handle(
+                &with_key(post("/api/v1/jobs", body), "sco_bad_invalid_secret"),
+                "ip",
+                0
+            )
+            .status,
+            401
+        );
+
+        let (forbidden_api, key) = api_with_developer();
+        assert_eq!(
+            forbidden_api
+                .handle(&with_key(get("/api/v1/keys"), &key), "ip", 0)
+                .status,
+            403
+        );
+
+        let value = metrics_snapshot(&api);
+        assert_eq!(value["data"]["auth_failures"]["missing_key"], 1);
+        assert_eq!(value["data"]["auth_failures"]["invalid_key"], 1);
+        assert_eq!(value["data"]["auth_failures"]["insufficient_permission"], 0);
+
+        let forbidden_value = metrics_snapshot(&forbidden_api);
+        assert_eq!(
+            forbidden_value["data"]["auth_failures"]["insufficient_permission"],
+            1
+        );
+
+        let text = String::from_utf8(api.handle(&get(METRICS_PATH), "ip", 0).body).unwrap();
+        assert!(text.contains("\nobservatory_api_auth_failures_missing_key_total 1\n"));
+        assert!(text.contains("\nobservatory_api_auth_failures_invalid_key_total 1\n"));
+        assert!(!text.contains("sco_bad_invalid_secret"));
+    }
+
+    #[test]
+    fn rate_limit_rejections_increment_reason_counters() {
+        let config = PlatformConfig {
+            require_auth: false,
+            rate_limit: observatory_platform::RateLimitConfig {
+                limit: 1,
+                window_secs: 60,
+            },
+            route_limits: BTreeMap::from([(
+                METRICS_PATH.to_string(),
+                observatory_platform::RateLimitConfig {
+                    limit: 100,
+                    window_secs: 60,
+                },
+            )]),
+            ..PlatformConfig::default()
+        };
+        let api = Api::new(config);
+        assert_eq!(api.handle(&get("/api/v1/health"), "ip", 0).status, 200);
+        assert_eq!(api.handle(&get("/api/v1/health"), "ip", 0).status, 429);
+
+        let value = metrics_snapshot(&api);
+        assert_eq!(value["data"]["rate_limited_total"], 1);
+        assert_eq!(value["data"]["rate_limit_rejections"]["window_exceeded"], 1);
+
+        let text = String::from_utf8(api.handle(&get(METRICS_PATH), "ip", 0).body).unwrap();
+        assert!(text.contains("\nobservatory_api_rate_limit_rejections_window_exceeded_total 1\n"));
     }
 
     fn get_query(path: &str, query: &str) -> Request {

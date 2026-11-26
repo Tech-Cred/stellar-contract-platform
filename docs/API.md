@@ -166,18 +166,25 @@ Aggregate request counters in the Prometheus text exposition format
 # HELP observatory_api_requests_total Total HTTP requests handled.
 # TYPE observatory_api_requests_total counter
 observatory_api_requests_total 42
+# HELP observatory_api_auth_failures_invalid_key_total Authentication failures by reason.
+# TYPE observatory_api_auth_failures_invalid_key_total counter
+observatory_api_auth_failures_invalid_key_total 3
 ```
 
 `?format=json` returns the same counters in the standard report envelope:
 
 ```json
-{ "schema_version": "1.0", "kind": "metrics", "tool": "stellar-contract-platform", "version": "0.1.0", "data": { "requests_total": 42, "analyses_total": 7, "errors_total": 3, "rate_limited_total": 0 } }
+{ "schema_version": "1.0", "kind": "metrics", "tool": "stellar-contract-platform", "version": "0.1.0", "data": { "requests_total": 42, "analyses_total": 7, "errors_total": 3, "rate_limited_total": 1, "auth_failures": { "insufficient_permission": 0, "invalid_key": 3, "missing_key": 1 }, "rate_limit_rejections": { "window_exceeded": 1 } } }
 ```
 
 Counters are process-local and monotonic. They cover every handled request,
 successful contract analyses, responses with a `4xx`/`5xx` status, and requests
-rejected by the rate limiter. The exposition is deterministic and contains no
-secrets.
+rejected by the rate limiter. Security counters are keyed by a fixed set of
+reasons: authentication failures use `missing_key`, `invalid_key`, and
+`insufficient_permission`; rate-limit rejections use `window_exceeded`. Reason
+names are enum constants, not caller-supplied strings, so the counter maps are
+bounded and cannot contain keys, tokens, paths, or other secret material. The
+exposition is deterministic and contains no secrets.
 
 ### `POST /api/v1/keys` (admin)
 Creates an API key. Requires `manage_keys`.

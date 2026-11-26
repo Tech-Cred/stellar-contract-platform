@@ -16,6 +16,7 @@ pub mod policy;
 pub mod project;
 pub mod ratelimit;
 pub mod rbac;
+pub mod security;
 pub mod service;
 pub mod store;
 pub mod webhook;
@@ -30,6 +31,10 @@ pub use policy::{load_policy, parse_policy};
 pub use project::{ConfigFormat, ProjectConfig};
 pub use ratelimit::{RateLimitConfig, RateLimitDecision, RateLimiter};
 pub use rbac::{authorize, authorize_with_scopes, validate_scopes, Permission, Role};
+pub use security::{
+    AuthFailureReason, RateLimitReason, SecurityMetrics, SecurityMetricsSnapshot,
+    AUTH_FAILURE_REASONS, RATE_LIMIT_REASONS,
+};
 pub use service::Observatory;
 pub use store::FileKeyStore;
 pub use webhook::{
