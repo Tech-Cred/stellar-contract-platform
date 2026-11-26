@@ -119,6 +119,9 @@ enum Command {
         /// Render the diff as Markdown (human mode only).
         #[arg(long)]
         markdown: bool,
+        /// Show only breaking changes; JSON keeps the full summary counts.
+        #[arg(long)]
+        breaking_only: bool,
     },
     /// Assess compatibility of two contract interfaces.
     Compat {
@@ -546,14 +549,24 @@ fn run(cli: &Cli, format: OutputFormat) -> Result<ObservatoryExit> {
             emit(format, "events", &payload, || print_events(&payload))?;
             Ok(ObservatoryExit::Success)
         }
-        Command::Diff { old, new, markdown } => {
+        Command::Diff {
+            old,
+            new,
+            markdown,
+            breaking_only,
+        } => {
             let old_interface = load_interface(old)?;
             let new_interface = load_interface(new)?;
             let result = diff(&old_interface, &new_interface);
-            if *markdown && format == OutputFormat::Human {
-                print!("{}", observatory_diff::render_markdown(&result));
+            let view = if *breaking_only {
+                result.breaking_only()
             } else {
-                emit(format, "diff", &result, || print_diff(&result))?;
+                result.clone()
+            };
+            if *markdown && format == OutputFormat::Human {
+                print!("{}", observatory_diff::render_markdown(&view));
+            } else {
+                emit(format, "diff", &view, || print_diff(&view))?;
             }
             Ok(ObservatoryExit::Success)
         }

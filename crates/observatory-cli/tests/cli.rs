@@ -319,6 +319,93 @@ fn diff_and_compat_report_breaking_change() {
 }
 
 #[test]
+fn diff_breaking_only_filters_human_output() {
+    let old = write_temp(&module_with_spec(&[spec_function("b", &[], None)]), ".wasm");
+    let new = write_temp(&module_with_spec(&[spec_function("c", &[], None)]), ".wasm");
+
+    binary()
+        .args([
+            "diff",
+            old.path().to_str().unwrap(),
+            new.path().to_str().unwrap(),
+            "--breaking-only",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "changes: 1 breaking, 1 non-breaking, 0 informational",
+        ))
+        .stdout(predicate::str::contains("! function::b:"))
+        .stdout(predicate::str::contains("function::c").not())
+        .stdout(predicate::str::contains("+ ").not());
+}
+
+#[test]
+fn diff_breaking_only_filters_markdown() {
+    let old = write_temp(&module_with_spec(&[spec_function("b", &[], None)]), ".wasm");
+    let new = write_temp(&module_with_spec(&[spec_function("c", &[], None)]), ".wasm");
+
+    binary()
+        .args([
+            "diff",
+            old.path().to_str().unwrap(),
+            new.path().to_str().unwrap(),
+            "--markdown",
+            "--breaking-only",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Interface diff"))
+        .stdout(predicate::str::contains("- Breaking: 1"))
+        .stdout(predicate::str::contains("- Non-breaking: 1"))
+        .stdout(predicate::str::contains("## Breaking"))
+        .stdout(predicate::str::contains("`function::b`"))
+        .stdout(predicate::str::contains("`function::c`").not());
+}
+
+#[test]
+fn diff_breaking_only_json_keeps_full_summary() {
+    let old = write_temp(&module_with_spec(&[spec_function("b", &[], None)]), ".wasm");
+    let new = write_temp(&module_with_spec(&[spec_function("c", &[], None)]), ".wasm");
+
+    let unfiltered = binary()
+        .args([
+            "diff",
+            old.path().to_str().unwrap(),
+            new.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let unfiltered: serde_json::Value = serde_json::from_slice(&unfiltered).unwrap();
+
+    let filtered = binary()
+        .args([
+            "diff",
+            old.path().to_str().unwrap(),
+            new.path().to_str().unwrap(),
+            "--json",
+            "--markdown",
+            "--breaking-only",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let filtered: serde_json::Value = serde_json::from_slice(&filtered).unwrap();
+
+    assert_eq!(filtered["data"]["summary"], unfiltered["data"]["summary"]);
+    let changes = filtered["data"]["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["severity"], "breaking");
+    assert_eq!(changes[0]["path"], "function::b");
+}
+
+#[test]
 fn events_filters_fixture() {
     use stellar_xdr::{Limits, ScSymbol, StringM, WriteXdr};
     let topic = stellar_xdr::ScVal::Symbol(ScSymbol(StringM::try_from("transfer").unwrap()))

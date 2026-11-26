@@ -43,6 +43,11 @@ including `old`/`new` renderings for signature and type changes.
 suitable for pull requests and reports. Identical inputs produce identical
 Markdown.
 
+`diff --breaking-only` limits the printed changes and JSON `changes` array to
+breaking changes. In JSON mode, `summary` still describes the full diff, so
+`total` can be greater than `changes.len()`. `--markdown` is ignored when JSON
+output is selected.
+
 ## Machine summary
 
 JSON output carries a `summary` object suitable for CI gates:
@@ -61,8 +66,10 @@ JSON output carries a `summary` object suitable for CI gates:
 }
 ```
 
-`total` equals `changes.len()`, and the severity counts always add up to
-`total`. `by_kind` is keyed in the stable `ChangeKind` declaration order
+Without `--breaking-only`, `total` equals `changes.len()`. With
+`--breaking-only`, `changes` is filtered while `summary` remains unchanged.
+The severity counts always add up to `total`. `by_kind` is keyed in the stable
+`ChangeKind` declaration order
 (functions, types, events; each in the enum's order) and lists only kinds that
 occurred; an absent key means zero. The object is emitted by serde and is
 byte-stable for identical inputs. The schema is

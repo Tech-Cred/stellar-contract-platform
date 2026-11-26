@@ -63,10 +63,15 @@ it offline: provide a `{ "__sequence": [page1, page2, ...] }` fixture where each
 page has `events`, and a `cursor` only when another page follows. Fetching is
 opt-in and offline; there is no live network path in the unit test suite.
 
-### `diff <OLD> <NEW>`
+### `diff <OLD> <NEW> [--markdown] [--breaking-only]`
 
 Diff two contract interfaces. Changes are classified as breaking,
 non-breaking, or informational. Always exits `0`.
+
+`--markdown` renders a Markdown report in human mode only. `--json` or
+`--format json` emits the JSON envelope and ignores `--markdown`.
+`--breaking-only` filters the human, Markdown, and JSON change lists to
+breaking changes; JSON output keeps the full summary counts.
 
 ### `compat <OLD> <NEW> [--policy strict|lenient] [--policy-file <FILE>]`
 
