@@ -105,6 +105,52 @@ pub fn module_with_producers(fields: &[(&str, &[(&str, &str)])]) -> Vec<u8> {
     module_with_custom_section("producers", &encode_producers(fields))
 }
 
+/// Encode a `name` section name map: a count followed by index/name pairs.
+#[must_use]
+pub fn encode_name_map(entries: &[(u32, &str)]) -> Vec<u8> {
+    let mut out = leb128(entries.len() as u64);
+    for (index, name) in entries {
+        out.extend(leb128(u64::from(*index)));
+        out.extend(leb128(name.len() as u64));
+        out.extend_from_slice(name.as_bytes());
+    }
+    out
+}
+
+/// Encode a `name` custom section payload with module, function, and type names.
+#[must_use]
+pub fn encode_name_section(
+    module: Option<&str>,
+    functions: &[(u32, &str)],
+    types: &[(u32, &str)],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(name) = module {
+        let mut payload = leb128(name.len() as u64);
+        payload.extend_from_slice(name.as_bytes());
+        out.push(0);
+        out.extend(leb128(payload.len() as u64));
+        out.extend(payload);
+    }
+    for (id, entries) in [(1u8, functions), (4u8, types)] {
+        let payload = encode_name_map(entries);
+        out.push(id);
+        out.extend(leb128(payload.len() as u64));
+        out.extend(payload);
+    }
+    out
+}
+
+/// A WASM module containing a `name` custom section.
+#[must_use]
+pub fn module_with_names(
+    module: Option<&str>,
+    functions: &[(u32, &str)],
+    types: &[(u32, &str)],
+) -> Vec<u8> {
+    module_with_custom_section("name", &encode_name_section(module, functions, types))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +188,14 @@ mod tests {
         assert_eq!(payload[0], 2);
         assert_eq!(payload[1], 8);
         assert_eq!(&payload[2..10], b"language");
+    }
+
+    #[test]
+    fn name_payload_uses_expected_subsection_ids() {
+        let payload = encode_name_section(Some("demo"), &[(0, "run")], &[(1, "Config")]);
+        assert_eq!(payload[0], 0);
+        assert_eq!(&payload[..5], &[0, 5, 4, b'd', b'e']);
+        assert!(payload.windows(2).any(|w| w == [1, 6]));
+        assert!(payload.windows(2).any(|w| w == [4, 9]));
     }
 }

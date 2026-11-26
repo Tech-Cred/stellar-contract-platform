@@ -60,6 +60,15 @@ export interface CustomSectionInfo {
   size: number;
 }
 
+export interface NameInfo {
+  /** Module name, when present. */
+  module?: string;
+  /** Function names keyed by function index. */
+  functions?: Record<string, string>;
+  /** Type names keyed by type index. */
+  types?: Record<string, string>;
+}
+
 export interface WasmReport {
   size_bytes: number;
   version: number;
@@ -72,6 +81,8 @@ export interface WasmReport {
   imports: ImportInfo[];
   exports: ExportInfo[];
   custom_sections: CustomSectionInfo[];
+  /** Present only when the `name` custom section yields at least one name. */
+  name?: NameInfo;
   code_section_bytes: number;
   has_contract_spec: boolean;
   contract_spec_bytes: number | null;

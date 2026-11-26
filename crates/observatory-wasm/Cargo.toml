@@ -20,6 +20,7 @@ hex.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 observatory-testutil.workspace = true
+serde_json.workspace = true
 wat.workspace = true
 tempfile.workspace = true
 

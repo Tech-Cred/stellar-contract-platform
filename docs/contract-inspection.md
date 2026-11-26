@@ -22,6 +22,7 @@
 | `imports` | Module, name, and kind, in module order. |
 | `exports` | Name and kind, in module order. |
 | `custom_sections` | Name and payload size, in module order. |
+| `name` | Module, function, and type names from the `name` section, when present; omitted otherwise. |
 | `producers` | Build provenance from the `producers` section (`language`, `processed-by`, `sdk`), when present and valid. |
 | `code_section_bytes` | Size of the code section. |
 | `has_contract_spec` | Whether `contractspecv0` is present. |
@@ -36,6 +37,11 @@
   `truncated` reports clipping. Counts are still read from section headers, so
   they stay exact when a summary list is clipped.
 - Malformed input returns a structured error (`wasm error`).
+- The `name` section is decoded with `wasmparser`'s name-section reader. Module,
+  function, and type names are reported when present; unsupported and malformed
+  subsections are skipped rather than failing inspection. Function and type maps
+  are bounded by `MAX_NAME_ENTRIES`, and individual names longer than
+  `MAX_NAME_BYTES` are skipped. Clipping is reported by `truncated`.
 - The `producers` section is decoded into bounded lists (at most
   `MAX_PRODUCER_ENTRIES` entries across all categories); its absence is not an
   error, and tool names are preserved verbatim.
