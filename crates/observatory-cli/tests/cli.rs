@@ -4,6 +4,7 @@
 use std::io::Write;
 
 use assert_cmd::Command;
+use observatory_interface::ContractInterface;
 use observatory_testutil::spec::{
     spec_enum_with_doc, spec_function, spec_function_with_doc, spec_struct, spec_struct_with_doc,
     spec_union_with_doc, ty_udt,
@@ -316,6 +317,117 @@ fn diff_and_compat_report_breaking_change() {
         .assert()
         .code(6)
         .stdout(predicate::str::contains("incompatible"));
+}
+
+#[test]
+fn diff_accepts_interface_json_against_wasm() {
+    let old_wasm =
+        module_with_spec(&[spec_function("a", &[], None), spec_function("b", &[], None)]);
+    let old_json = ContractInterface::from_wasm(&old_wasm)
+        .expect("build interface")
+        .canonical_json()
+        .expect("encode interface");
+    let old = write_temp(&old_json, ".json");
+    let new = write_temp(&module_with_spec(&[spec_function("a", &[], None)]), ".wasm");
+
+    binary()
+        .args([
+            "diff",
+            old.path().to_str().unwrap(),
+            new.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("function::b"))
+        .stdout(predicate::str::contains("breaking"));
+}
+
+#[test]
+fn interface_json_vs_wasm_matches_wasm_vs_wasm() {
+    let old_wasm =
+        module_with_spec(&[spec_function("a", &[], None), spec_function("b", &[], None)]);
+    let new_wasm = module_with_spec(&[spec_function("a", &[], None)]);
+    let old_json = ContractInterface::from_wasm(&old_wasm)
+        .expect("build interface")
+        .canonical_json()
+        .expect("encode interface");
+    let old = write_temp(&old_json, ".json");
+    let old_binary = write_temp(&old_wasm, ".wasm");
+    let new = write_temp(&new_wasm, ".wasm");
+
+    let from_json = binary()
+        .args([
+            "diff",
+            old.path().to_str().unwrap(),
+            new.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let from_wasm = binary()
+        .args([
+            "diff",
+            old_binary.path().to_str().unwrap(),
+            new.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let from_json: serde_json::Value = serde_json::from_slice(&from_json).unwrap();
+    let from_wasm: serde_json::Value = serde_json::from_slice(&from_wasm).unwrap();
+    assert_eq!(from_json["data"], from_wasm["data"]);
+}
+
+#[test]
+fn diff_rejects_invalid_interface_json() {
+    let malformed = write_temp(b"{", ".json");
+    binary()
+        .args([
+            "diff",
+            malformed.path().to_str().unwrap(),
+            malformed.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("invalid JSON"));
+
+    let wrong_version = write_temp(
+        br#"{"schema_version":"999","functions":[],"structs":[],"unions":[],"enums":[],"error_enums":[],"events":[]}"#,
+        ".json",
+    );
+    binary()
+        .args([
+            "diff",
+            wrong_version.path().to_str().unwrap(),
+            wrong_version.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("\"code\":\"decode\""))
+        .stdout(predicate::str::contains(
+            "unsupported interface schema_version",
+        ));
+
+    let wrong_shape = write_temp(b"{}", ".json");
+    binary()
+        .args([
+            "diff",
+            wrong_shape.path().to_str().unwrap(),
+            wrong_shape.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("\"code\":\"decode\""))
+        .stdout(predicate::str::contains("missing `schema_version`"));
 }
 
 #[test]

@@ -65,8 +65,11 @@ opt-in and offline; there is no live network path in the unit test suite.
 
 ### `diff <OLD> <NEW> [--markdown] [--breaking-only]`
 
-Diff two contract interfaces. Changes are classified as breaking,
-non-breaking, or informational. Always exits `0`.
+Diff two contract interfaces. Each side may be a `.wasm` artifact or a
+canonical interface document (`.json`) produced by `canonical_json()`. JSON and
+WASM inputs can be mixed, and malformed or version-mismatched interface JSON is
+a decode error (`4`). Changes are classified as breaking, non-breaking, or
+informational. Always exits `0` for a successful diff.
 
 `--markdown` renders a Markdown report in human mode only. `--json` or
 `--format json` emits the JSON envelope and ignores `--markdown`.

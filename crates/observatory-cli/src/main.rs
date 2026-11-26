@@ -555,8 +555,8 @@ fn run(cli: &Cli, format: OutputFormat) -> Result<ObservatoryExit> {
             markdown,
             breaking_only,
         } => {
-            let old_interface = load_interface(old)?;
-            let new_interface = load_interface(new)?;
+            let old_interface = load_interface_for_diff(old)?;
+            let new_interface = load_interface_for_diff(new)?;
             let result = diff(&old_interface, &new_interface);
             let view = if *breaking_only {
                 result.breaking_only()
@@ -943,6 +943,24 @@ fn verification_exit(status: VerificationStatus, failures: &BTreeSet<String>) ->
 fn load_interface(path: &Path) -> Result<ContractInterface> {
     let bytes = observatory_wasm::load_file(path)?;
     ContractInterface::from_wasm(&bytes)
+}
+
+fn load_interface_for_diff(path: &Path) -> Result<ContractInterface> {
+    let is_json = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+    if !is_json {
+        return load_interface(path);
+    }
+
+    let value = read_json(path)?;
+    ContractInterface::from_json(&value).map_err(|error| {
+        ObservatoryError::decode(format!(
+            "invalid interface JSON in `{}`: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn fixture_client(path: &Path) -> Result<RpcClient<MockTransport>> {

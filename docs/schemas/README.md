@@ -20,7 +20,8 @@ instead of `data`.
 produced by `observatory_interface::ContractInterface::canonical_json()`. Its
 `schema_version` const is `observatory_interface::INTERFACE_SCHEMA_VERSION`; the
 tests in `crates/observatory-interface` assert the two stay in sync and reject a
-mismatched version.
+mismatched version. The `diff` CLI accepts these documents as either side of a
+comparison; see [`interface-diff.md`](../interface-diff.md).
 
 ## Validation
 

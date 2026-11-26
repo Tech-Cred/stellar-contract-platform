@@ -28,6 +28,16 @@ Events: `event_added`, `event_removed`, `event_changed`, `event_renamed`.
 | Event renamed (identical shape) | breaking |
 | Event definition changed | breaking |
 
+## Inputs
+
+Each side of a diff may be a `.wasm` artifact or a canonical interface document
+(`.json`) serialized by `ContractInterface::canonical_json()`. JSON inputs are
+version-checked, deserialized into the canonical interface model, and
+canonicalized again before diffing; extra additive fields are ignored under the
+interface versioning policy. Invalid JSON, an unknown `schema_version`, or an
+interface with the wrong shape is a decode error (`4`). Mixing JSON and WASM
+sides is supported, and equivalent interfaces produce the same diff.
+
 ## Determinism
 
 Changes are sorted by kind rank, then path, then detail. Running `diff` twice on
