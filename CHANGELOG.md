@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Diff: each side of `diff` accepts a canonical interface `.json` document in
+  addition to a `.wasm` artifact. JSON is version-checked and canonicalized, and
+  JSON/WASM comparisons are deterministic (#76).
+- Diff: `diff --breaking-only` filters human, Markdown, and JSON change lists
+  to breaking changes while preserving full summary counts in JSON (#75).
 - Events: normalized records retain bounded base64 `ScVal` XDR in
   `raw_topics` and `raw_data`, allowing downstream tools to independently
   decode the exact topic and data values (#88).

@@ -28,6 +28,16 @@ Events: `event_added`, `event_removed`, `event_changed`, `event_renamed`.
 | Event renamed (identical shape) | breaking |
 | Event definition changed | breaking |
 
+## Inputs
+
+Each side of a diff may be a `.wasm` artifact or a canonical interface document
+(`.json`) serialized by `ContractInterface::canonical_json()`. JSON inputs are
+version-checked, deserialized into the canonical interface model, and
+canonicalized again before diffing; extra additive fields are ignored under the
+interface versioning policy. Invalid JSON, an unknown `schema_version`, or an
+interface with the wrong shape is a decode error (`4`). Mixing JSON and WASM
+sides is supported, and equivalent interfaces produce the same diff.
+
 ## Determinism
 
 Changes are sorted by kind rank, then path, then detail. Running `diff` twice on
@@ -42,6 +52,11 @@ including `old`/`new` renderings for signature and type changes.
 `diff --markdown` renders a deterministic Markdown report grouped by severity,
 suitable for pull requests and reports. Identical inputs produce identical
 Markdown.
+
+`diff --breaking-only` limits the printed changes and JSON `changes` array to
+breaking changes. In JSON mode, `summary` still describes the full diff, so
+`total` can be greater than `changes.len()`. `--markdown` is ignored when JSON
+output is selected.
 
 ## Machine summary
 
@@ -61,8 +76,10 @@ JSON output carries a `summary` object suitable for CI gates:
 }
 ```
 
-`total` equals `changes.len()`, and the severity counts always add up to
-`total`. `by_kind` is keyed in the stable `ChangeKind` declaration order
+Without `--breaking-only`, `total` equals `changes.len()`. With
+`--breaking-only`, `changes` is filtered while `summary` remains unchanged.
+The severity counts always add up to `total`. `by_kind` is keyed in the stable
+`ChangeKind` declaration order
 (functions, types, events; each in the enum's order) and lists only kinds that
 occurred; an absent key means zero. The object is emitted by serde and is
 byte-stable for identical inputs. The schema is

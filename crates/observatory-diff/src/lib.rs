@@ -142,6 +142,23 @@ impl InterfaceDiff {
     pub fn has_breaking_changes(&self) -> bool {
         self.summary.breaking > 0
     }
+
+    /// Return a view containing only breaking changes.
+    ///
+    /// The full-diff summary is preserved so callers can report accurate
+    /// counts even when the change list is filtered.
+    #[must_use]
+    pub fn breaking_only(&self) -> Self {
+        Self {
+            changes: self
+                .changes
+                .iter()
+                .filter(|change| change.severity == Severity::Breaking)
+                .cloned()
+                .collect(),
+            summary: self.summary.clone(),
+        }
+    }
 }
 
 /// Diff two canonical interfaces. The result is deterministic.
@@ -1297,6 +1314,44 @@ mod tests {
         assert!(markdown.contains("## Breaking"));
         assert!(markdown.contains("`function::b`"));
         assert_eq!(markdown, render_markdown(&result));
+    }
+
+    #[test]
+    fn breaking_only_keeps_summary_and_preserves_order() {
+        let old = interface(vec![spec_function("removed", &[], None)]);
+        let new = interface(vec![spec_function("added", &[], None)]);
+        let result = diff(&old, &new);
+        let filtered = result.breaking_only();
+
+        assert_eq!(filtered.summary, result.summary);
+        assert!(filtered
+            .changes
+            .iter()
+            .all(|change| change.severity == Severity::Breaking));
+        let expected: Vec<&str> = result
+            .changes
+            .iter()
+            .filter(|change| change.severity == Severity::Breaking)
+            .map(|change| change.path.as_str())
+            .collect();
+        let actual: Vec<&str> = filtered
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(actual, vec!["function::removed"]);
+    }
+
+    #[test]
+    fn breaking_only_without_breaking_changes_is_empty() {
+        let old = interface(vec![]);
+        let new = interface(vec![spec_function("added", &[], None)]);
+        let result = diff(&old, &new);
+        let filtered = result.breaking_only();
+
+        assert!(filtered.changes.is_empty());
+        assert_eq!(filtered.summary, result.summary);
     }
 
     #[test]

@@ -75,6 +75,37 @@ impl ContractInterface {
         )?))
     }
 
+    /// Parse a canonical interface from JSON.
+    ///
+    /// The schema version is checked explicitly, and additive fields are
+    /// ignored so newer documents remain readable under the versioning policy.
+    pub fn from_json(value: &serde_json::Value) -> Result<Self> {
+        let version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                ObservatoryError::decode("interface JSON is missing `schema_version`")
+            })?;
+        if version != INTERFACE_SCHEMA_VERSION {
+            return Err(ObservatoryError::decode(format!(
+                "unsupported interface schema_version `{version}`; expected `{INTERFACE_SCHEMA_VERSION}`"
+            )));
+        }
+
+        let mut interface: Self = serde_json::from_value(value.clone()).map_err(|error| {
+            ObservatoryError::decode(format!("invalid interface JSON: {error}"))
+        })?;
+        interface.canonicalize();
+        Ok(interface)
+    }
+
+    /// Parse a canonical interface from JSON bytes.
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|error| ObservatoryError::decode(format!("invalid JSON: {error}")))?;
+        Self::from_json(&value)
+    }
+
     /// Sort all name-keyed collections. Field/parameter/case order is preserved.
     pub fn canonicalize(&mut self) {
         self.functions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -542,6 +573,40 @@ mod tests {
         assert_eq!(decoded.structs.len(), 1);
         assert_eq!(decoded.error_enums.len(), 1);
         assert_eq!(decoded.events.len(), 1);
+    }
+
+    #[test]
+    fn from_json_parses_and_canonicalizes_canonical_documents() {
+        let interface = ContractInterface::from_spec(spec(vec![
+            spec_function("a", &[], None),
+            spec_function("b", &[], None),
+        ]));
+        let mut value = serde_json::to_value(&interface).expect("serialize interface");
+        let functions = value["functions"].as_array_mut().expect("functions array");
+        functions.reverse();
+        value["additive_future_field"] = serde_json::json!("ignored");
+
+        let decoded = ContractInterface::from_json(&value).expect("parse interface JSON");
+        assert_eq!(decoded, interface);
+        assert_eq!(
+            decoded.fingerprint().expect("fingerprint"),
+            interface.fingerprint().expect("fingerprint")
+        );
+    }
+
+    #[test]
+    fn from_json_rejects_missing_or_unsupported_schema_version() {
+        assert!(ContractInterface::from_json(&serde_json::json!({})).is_err());
+
+        let mut value = serde_json::to_value(ContractInterface::from_spec(spec(vec![])))
+            .expect("serialize interface");
+        value["schema_version"] = serde_json::json!("999");
+        assert!(ContractInterface::from_json(&value).is_err());
+    }
+
+    #[test]
+    fn from_json_bytes_rejects_malformed_json() {
+        assert!(ContractInterface::from_json_bytes(b"{").is_err());
     }
 
     #[test]
