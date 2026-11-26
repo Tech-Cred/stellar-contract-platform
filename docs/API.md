@@ -201,6 +201,33 @@ are never included.
 Revokes a key. Requires `manage_keys`. Revocation takes effect immediately; the
 next request with that key receives `401`. An unknown id returns `404`.
 
+### `POST /api/v1/keys/{id}/rotate` (admin)
+Rotates a key without rotating every credential at once. Requires
+`manage_keys`. Body:
+
+```json
+{ "confirm": true, "label": "ci-rotated", "scopes": ["run_analysis"], "grace_period_secs": 60 }
+```
+
+Only `confirm` is required; it must be `true`. The replacement inherits the old
+key's role, label, and scopes unless `label` or `scopes` is supplied, and its
+secret is freshly generated. The response contains the new plaintext exactly
+once, the new id, and `old_key_revoked_at`.
+
+**Workflow**
+
+1. Call rotate with the old key id. Use `grace_period_secs` to keep the old key
+   valid while clients are updated; omit it (or use `0`) to revoke immediately.
+2. Deploy the returned plaintext to the client and verify it authenticates.
+3. During the grace window both keys work. On the first request at or after
+   `old_key_revoked_at`, the old key is revoked and an audit event with outcome
+   `grace_expired` is recorded.
+4. If no grace period was requested, the old key is revoked before the response
+   is returned.
+
+An unknown or already-revoked id returns `404`. Invalid input returns `400`.
+No plaintext or hash is written to the key store during rotation.
+
 ### `POST /api/v1/contracts/inspect`
 Body: `{ "wasm_base64": "...", "security": false }`.
 Returns the WASM report, the canonical interface (when present), and the audit

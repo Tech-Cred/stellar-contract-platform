@@ -8,13 +8,14 @@
 //! The file is JSON with an explicit version. Writes go to a temporary file and
 //! are renamed into place, so a crash cannot leave a half-written store.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use observatory_core::{ObservatoryError, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{ApiKeyRecord, ApiKeyStore, KeyStore, Principal};
+use crate::auth::{ApiKeyRecord, ApiKeyStore, KeyRotation, KeyStore, Principal};
 use crate::rbac::{Permission, Role};
 
 /// On-disk format version.
@@ -24,6 +25,8 @@ pub const STORE_VERSION: u32 = 1;
 struct PersistedStore {
     version: u32,
     keys: Vec<PersistedKey>,
+    #[serde(default)]
+    pending_revocations: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -97,6 +100,7 @@ impl FileKeyStore {
             for key in persisted.keys {
                 store.insert_record(key.into());
             }
+            store.pending_revocations = persisted.pending_revocations;
             store
         } else {
             ApiKeyStore::new()
@@ -129,6 +133,7 @@ impl FileKeyStore {
                 .into_iter()
                 .map(PersistedKey::from)
                 .collect(),
+            pending_revocations: self.inner.pending_revocations.clone(),
         };
         let text = serde_json::to_string_pretty(&document).map_err(|error| {
             ObservatoryError::internal(format!("cannot encode key store: {error}"))
@@ -195,6 +200,31 @@ impl KeyStore for FileKeyStore {
             let _ = self.persist();
         }
         changed
+    }
+
+    fn rotate(
+        &mut self,
+        id: &str,
+        label: Option<&str>,
+        scopes: Option<Vec<Permission>>,
+        grace_period_secs: Option<u64>,
+        now_secs: u64,
+    ) -> Result<Option<(String, KeyRotation)>> {
+        let rotated = self
+            .inner
+            .rotate(id, label, scopes, grace_period_secs, now_secs)?;
+        if rotated.is_some() {
+            self.persist()?;
+        }
+        Ok(rotated)
+    }
+
+    fn revoke_expired(&mut self, now_secs: u64) -> Vec<String> {
+        let revoked = self.inner.revoke_expired(now_secs);
+        if !revoked.is_empty() {
+            let _ = self.persist();
+        }
+        revoked
     }
 
     fn authenticate(&self, provided: &str) -> Option<Principal> {
@@ -296,6 +326,40 @@ mod tests {
             .list()
             .iter()
             .any(|key| key.id == record.id && key.scopes.is_some()));
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rotation_and_pending_grace_survive_a_reopen() {
+        let path = temp_path();
+        let (old_plaintext, old_id, new_plaintext, rotation) = {
+            let mut store = FileKeyStore::open(&path).unwrap();
+            let (old_plaintext, record) = store.generate(Role::Developer, "ci", None).unwrap();
+            let (new_plaintext, rotation) = store
+                .rotate(&record.id, None, None, Some(60), 100)
+                .unwrap()
+                .expect("rotation succeeds");
+            (old_plaintext, record.id, new_plaintext, rotation)
+        };
+        assert_eq!(rotation.revoke_at, 160);
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&old_plaintext));
+        assert!(!text.contains(&new_plaintext));
+        assert!(text.contains("pending_revocations"));
+
+        let mut reopened = FileKeyStore::open(&path).unwrap();
+        assert!(reopened.authenticate(&old_plaintext).is_some());
+        assert!(reopened.authenticate(&new_plaintext).is_some());
+        assert!(reopened.revoke_expired(159).is_empty());
+        assert_eq!(reopened.revoke_expired(160), vec![old_id]);
+        assert!(reopened.authenticate(&old_plaintext).is_none());
+        assert!(reopened.authenticate(&new_plaintext).is_some());
+
+        let after_reopen = FileKeyStore::open(&path).unwrap();
+        assert!(after_reopen.authenticate(&old_plaintext).is_none());
+        assert!(after_reopen.authenticate(&new_plaintext).is_some());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

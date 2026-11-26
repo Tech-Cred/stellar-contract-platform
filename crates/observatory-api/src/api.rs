@@ -15,16 +15,17 @@ use observatory_core::{ObservatoryError, Result as CoreResult, SCHEMA_VERSION, T
 use observatory_output::report;
 use observatory_platform::{
     authorize_with_scopes, validate_scopes, ApiKeyRecord, ApiKeyStore, AuditEvent, AuditLog,
-    AuthFailureReason, CompatibilityPolicy, JobQueue, KeyStore, Observatory, Permission,
-    PlatformConfig, Principal, RateLimitReason, RateLimiter, Role, WebhookEvent, WebhookStore,
+    AuthFailureReason, CompatibilityPolicy, JobQueue, KeyRotation, KeyStore, Observatory,
+    Permission, PlatformConfig, Principal, RateLimitReason, RateLimiter, Role, WebhookEvent,
+    WebhookStore,
 };
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::dto::{
     decode_wasm, CancelJobRequest, CompatibilityRequest, CreateJobRequest, CreateKeyRequest,
-    CreateWebhookRequest, DiffRequest, EventsRequest, InspectRequest, UpdateWebhookRequest,
-    WasmRequest,
+    CreateWebhookRequest, DiffRequest, EventsRequest, InspectRequest, RotateKeyRequest,
+    UpdateWebhookRequest, WasmRequest,
 };
 use crate::errors::entry as error_entry;
 use crate::http::{Request, Response};
@@ -62,6 +63,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/keys"),
     ("GET", "/api/v1/keys"),
     ("DELETE", "/api/v1/keys/{id}"),
+    ("POST", "/api/v1/keys/{id}/rotate"),
     ("POST", "/api/v1/webhooks"),
     ("GET", "/api/v1/webhooks"),
     ("GET", "/api/v1/webhooks/{id}"),
@@ -391,6 +393,52 @@ impl Api {
         changed
     }
 
+    /// The role granted to a key, if it exists and is active.
+    #[must_use]
+    pub fn key_role(&self, id: &str) -> Option<Role> {
+        self.keys
+            .read()
+            .expect("key store poisoned")
+            .list()
+            .into_iter()
+            .find(|record| record.id == id && !record.revoked)
+            .map(|record| record.role)
+    }
+
+    /// Rotate a key, returning the new plaintext exactly once.
+    pub fn rotate_key(
+        &self,
+        id: &str,
+        label: Option<&str>,
+        scopes: Option<Vec<Permission>>,
+        grace_period_secs: Option<u64>,
+        now_secs: u64,
+    ) -> CoreResult<Option<(String, KeyRotation)>> {
+        let result = {
+            let mut keys = self.keys.write().expect("key store poisoned");
+            keys.rotate(id, label, scopes, grace_period_secs, now_secs)?
+        };
+        match &result {
+            Some((_, rotation)) => self.record_audit(
+                None,
+                "key.rotate",
+                &format!("key:{}:{}", rotation.old_id, rotation.new_record.id),
+                "success",
+                None,
+                now_secs,
+            ),
+            None => self.record_audit(
+                None,
+                "key.rotate",
+                &format!("key:{id}"),
+                "failure",
+                None,
+                now_secs,
+            ),
+        }
+        Ok(result)
+    }
+
     /// Handle a request.
     #[must_use]
     pub fn handle(&self, request: &Request, client_id: &str, now_secs: u64) -> Response {
@@ -408,6 +456,23 @@ impl Api {
             self.counter.fetch_add(1, Ordering::Relaxed) + 1
         );
         self.metrics.record_request();
+        // A rotation grace period is evaluated lazily on the next request, so
+        // the exact clock is supplied by the caller and stays testable.
+        let expired = self
+            .keys
+            .write()
+            .expect("key store poisoned")
+            .revoke_expired(now_secs);
+        for id in expired {
+            self.record_audit(
+                None,
+                "key.revoke",
+                &format!("key:{id}"),
+                "grace_expired",
+                Some(request_id.clone()),
+                now_secs,
+            );
+        }
         let auth = self.principal(request);
         let rate_key = auth
             .key_id()
@@ -745,6 +810,60 @@ impl Api {
                 let page_request = PageRequest::parse(request)?;
                 let page = page_of(self.list_keys(), page_request.skip, page_request.limit);
                 Ok(response(200, "api_keys", &page))
+            }
+            ("POST", path) if path.starts_with("/api/v1/keys/") && path.ends_with("/rotate") => {
+                self.require(auth, Permission::ManageKeys)?;
+                let id = path
+                    .strip_prefix("/api/v1/keys/")
+                    .and_then(|rest| rest.strip_suffix("/rotate"))
+                    .unwrap_or_default();
+                if id.is_empty() || id.contains('/') {
+                    return Err(ApiError::not_found("unknown API key"));
+                }
+                let body: RotateKeyRequest = parse_json(request)?;
+                if !body.confirm {
+                    return Err(ApiError::bad_request(
+                        "rotation must be confirmed with `confirm: true`",
+                    ));
+                }
+                if body
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.trim().is_empty())
+                {
+                    return Err(ApiError::bad_request("label must not be empty"));
+                }
+                let role = self
+                    .key_role(id)
+                    .ok_or_else(|| ApiError::not_found("unknown API key"))?;
+                let scopes = parse_scopes(role, body.scopes.as_deref())?;
+                let rotated = self
+                    .rotate_key(
+                        id,
+                        body.label.as_deref(),
+                        scopes,
+                        body.grace_period_secs,
+                        now_secs,
+                    )
+                    .map_err(ApiError::from)?;
+                let Some((plaintext, rotation)) = rotated else {
+                    return Err(ApiError::not_found("unknown API key"));
+                };
+                Ok(response(
+                    200,
+                    "api_key_rotation",
+                    &serde_json::json!({
+                        "old_id": rotation.old_id,
+                        "id": rotation.new_record.id,
+                        "role": rotation.new_record.role,
+                        "scopes": rotation.new_record.scopes,
+                        "label": rotation.new_record.label,
+                        "plaintext": plaintext,
+                        "grace_period_secs": rotation.grace_period_secs,
+                        "old_key_revoked_at": rotation.revoke_at,
+                        "note": "the new plaintext key is shown once and cannot be retrieved again",
+                    }),
+                ))
             }
             ("DELETE", path) if path.starts_with("/api/v1/keys/") => {
                 self.require(auth, Permission::ManageKeys)?;
@@ -2109,6 +2228,167 @@ mod tests {
 
         let missing = with_key(delete("/api/v1/keys/does-not-exist"), &admin);
         assert_eq!(api.handle(&missing, "ip", 0).status, 404);
+    }
+
+    #[test]
+    fn admin_can_rotate_a_key_immediately() {
+        let (api, admin) = api_with_admin();
+        let created = api.handle(
+            &with_key(
+                post(
+                    "/api/v1/keys",
+                    serde_json::json!({ "role": "developer", "label": "ci" }),
+                ),
+                &admin,
+            ),
+            "ip",
+            0,
+        );
+        let created_body: Value = serde_json::from_slice(&created.body).unwrap();
+        let old_plaintext = created_body["data"]["plaintext"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let id = created_body["data"]["id"].as_str().unwrap().to_string();
+
+        let response = api.handle(
+            &with_key(
+                post(
+                    &format!("/api/v1/keys/{id}/rotate"),
+                    serde_json::json!({ "confirm": true }),
+                ),
+                &admin,
+            ),
+            "ip",
+            10,
+        );
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        let data = &body["data"];
+        let new_plaintext = data["plaintext"].as_str().unwrap().to_string();
+        assert_ne!(new_plaintext, old_plaintext);
+        assert_eq!(data["old_id"], id);
+        assert_eq!(data["role"], "developer");
+        assert_eq!(data["old_key_revoked_at"], 10);
+        assert!(data["grace_period_secs"].is_null());
+
+        let analysis = || {
+            post(
+                "/api/v1/contracts/inspect",
+                serde_json::json!({ "wasm_base64": contract() }),
+            )
+        };
+        assert_eq!(
+            api.handle(&with_key(analysis(), &new_plaintext), "ip", 11)
+                .status,
+            200
+        );
+        assert_eq!(
+            api.handle(&with_key(analysis(), &old_plaintext), "ip", 11)
+                .status,
+            401
+        );
+        assert!(api
+            .audit_events()
+            .iter()
+            .any(|event| { event.action == "key.rotate" && event.outcome == "success" }));
+    }
+
+    #[test]
+    fn rotation_grace_period_keeps_the_old_key_valid_until_expiry() {
+        let (api, admin) = api_with_admin();
+        let created = api.handle(
+            &with_key(
+                post(
+                    "/api/v1/keys",
+                    serde_json::json!({ "role": "developer", "label": "ci" }),
+                ),
+                &admin,
+            ),
+            "ip",
+            0,
+        );
+        let created_body: Value = serde_json::from_slice(&created.body).unwrap();
+        let old_plaintext = created_body["data"]["plaintext"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let id = created_body["data"]["id"].as_str().unwrap().to_string();
+
+        let response = api.handle(
+            &with_key(
+                post(
+                    &format!("/api/v1/keys/{id}/rotate"),
+                    serde_json::json!({ "confirm": true, "grace_period_secs": 60 }),
+                ),
+                &admin,
+            ),
+            "ip",
+            100,
+        );
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        let new_plaintext = body["data"]["plaintext"].as_str().unwrap().to_string();
+        assert_eq!(body["data"]["grace_period_secs"], 60);
+        assert_eq!(body["data"]["old_key_revoked_at"], 160);
+
+        let analysis = || {
+            post(
+                "/api/v1/contracts/inspect",
+                serde_json::json!({ "wasm_base64": contract() }),
+            )
+        };
+        assert_eq!(
+            api.handle(&with_key(analysis(), &old_plaintext), "ip", 101)
+                .status,
+            200
+        );
+        assert_eq!(
+            api.handle(&with_key(analysis(), &new_plaintext), "ip", 101)
+                .status,
+            200
+        );
+        assert_eq!(
+            api.handle(&with_key(analysis(), &old_plaintext), "ip", 159)
+                .status,
+            200
+        );
+        assert_eq!(
+            api.handle(&with_key(analysis(), &old_plaintext), "ip", 160)
+                .status,
+            401
+        );
+        assert_eq!(
+            api.handle(&with_key(analysis(), &new_plaintext), "ip", 160)
+                .status,
+            200
+        );
+        assert!(api
+            .audit_events()
+            .iter()
+            .any(|event| { event.action == "key.revoke" && event.outcome == "grace_expired" }));
+    }
+
+    #[test]
+    fn rotation_rejects_unconfirmed_and_unknown_requests() {
+        let (api, admin) = api_with_admin();
+        let unconfirmed = with_key(
+            post(
+                "/api/v1/keys/missing/rotate",
+                serde_json::json!({ "confirm": false }),
+            ),
+            &admin,
+        );
+        assert_eq!(api.handle(&unconfirmed, "ip", 0).status, 400);
+
+        let unknown = with_key(
+            post(
+                "/api/v1/keys/missing/rotate",
+                serde_json::json!({ "confirm": true }),
+            ),
+            &admin,
+        );
+        assert_eq!(api.handle(&unknown, "ip", 0).status, 404);
     }
 
     #[test]
