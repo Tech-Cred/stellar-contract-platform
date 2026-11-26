@@ -142,7 +142,8 @@ Everything is validated while the file is parsed, before any command runs.
   is an error; `MATCH` is rejected.
 - An unsupported file extension is an unsupported-feature error (exit code `5`).
 
-`analysis.compatibility.policy` accepts only the `strict` and `lenient` presets.
+`analysis.compatibility.policy` accepts the `strict`, `additive-only`, and
+`lenient` presets.
 For individual rule settings, pass a separate policy document to
 `compat --policy-file <FILE>`; see [compatibility.md](compatibility.md).
 

@@ -770,10 +770,11 @@ impl Api {
                 let body: CompatibilityRequest = parse_json(request)?;
                 let policy = match body.policy.as_str() {
                     "strict" => CompatibilityPolicy::strict(),
+                    "additive-only" | "additive_only" => CompatibilityPolicy::additive_only(),
                     "lenient" => CompatibilityPolicy::lenient(),
                     other => {
                         return Err(ApiError::bad_request(format!(
-                            "unknown policy `{other}`; expected strict or lenient"
+                            "unknown policy `{other}`; expected strict, additive-only, or lenient"
                         )))
                     }
                 };
@@ -1401,6 +1402,33 @@ mod tests {
         let response = api.handle(&request, "ip", 0);
         assert_eq!(response.status, 200);
         assert!(String::from_utf8_lossy(&response.body).contains("\"status\":\"unknown\""));
+    }
+
+    #[test]
+    fn additive_only_policy_accepts_additions_in_the_api() {
+        let (api, key) = api_with_developer();
+        let old = base64::engine::general_purpose::STANDARD
+            .encode(module_with_spec(&[spec_function("hello", &[], None)]));
+        let new = base64::engine::general_purpose::STANDARD.encode(module_with_spec(&[
+            spec_function("hello", &[], None),
+            spec_function("added", &[], None),
+        ]));
+        let request = with_key(
+            post(
+                "/api/v1/contracts/compatibility",
+                serde_json::json!({
+                    "old_wasm_base64": old,
+                    "new_wasm_base64": new,
+                    "policy": "additive-only",
+                }),
+            ),
+            &key,
+        );
+        let response = api.handle(&request, "ip", 0);
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["data"]["status"], "compatible");
+        assert_eq!(body["data"]["policy"]["function_removal_is_breaking"], true);
     }
 
     #[test]

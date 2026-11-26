@@ -120,7 +120,7 @@ pub fn document() -> Value {
                         "new_wasm_base64": { "type": "string" },
                         "policy": {
                             "type": "string",
-                            "enum": ["strict", "lenient"],
+                            "enum": ["strict", "additive-only", "lenient"],
                             "default": "strict"
                         }
                     }
@@ -452,7 +452,7 @@ mod tests {
         let compatibility = &document["components"]["schemas"]["CompatibilityRequest"];
         assert_eq!(
             compatibility["properties"]["policy"]["enum"],
-            json!(["strict", "lenient"])
+            json!(["strict", "additive-only", "lenient"])
         );
     }
 

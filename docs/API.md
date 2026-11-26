@@ -208,8 +208,9 @@ interface diff.
 
 ### `POST /api/v1/contracts/compatibility`
 Body: `{ "old_wasm_base64": "...", "new_wasm_base64": "...", "policy": "strict" }`.
-Returns the compatibility assessment. `policy` is `strict` (default) or
-`lenient`.
+Returns the compatibility assessment. `policy` is `strict` (default),
+`additive-only`, or `lenient`; `additive-only` accepts additions and treats
+removals, renames, and modifications as breaking.
 
 ### `POST /api/v1/contracts/fingerprint`
 Body: `{ "wasm_base64": "..." }`. Returns artifact and interface fingerprints.

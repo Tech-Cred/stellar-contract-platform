@@ -77,7 +77,7 @@ pub struct AnalysisSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompatibilitySection {
-    /// Policy name: `strict` or `lenient`.
+    /// Policy name: `strict`, `additive-only`, or `lenient`.
     #[serde(default = "default_policy")]
     pub policy: String,
 }
@@ -97,9 +97,10 @@ impl Default for CompatibilitySection {
 fn parse_compatibility_policy(name: &str) -> Result<crate::CompatibilityPolicy> {
     match name {
         "strict" => Ok(crate::CompatibilityPolicy::strict()),
+        "additive-only" | "additive_only" => Ok(crate::CompatibilityPolicy::additive_only()),
         "lenient" => Ok(crate::CompatibilityPolicy::lenient()),
         other => Err(ObservatoryError::invalid(format!(
-            "unknown compatibility policy `{other}`; expected strict or lenient"
+            "unknown compatibility policy `{other}`; expected strict, additive-only, or lenient"
         ))),
     }
 }
@@ -486,6 +487,23 @@ mod tests {
         assert!(!config.api.require_auth);
         assert_eq!(config.rate_limit().limit, 5);
         assert_eq!(config.rate_limit().window_secs, 30);
+    }
+
+    #[test]
+    fn resolves_the_additive_only_policy_preset() {
+        let config = ProjectConfig::parse(
+            "analysis:\n  compatibility:\n    policy: additive-only\nprofiles:\n  public:\n    policy: additive_only\n",
+            ConfigFormat::Yaml,
+        )
+        .unwrap();
+        assert_eq!(
+            config.compatibility_policy().unwrap(),
+            crate::CompatibilityPolicy::additive_only()
+        );
+        assert_eq!(
+            config.compatibility_policy_for(Some("public")).unwrap(),
+            crate::CompatibilityPolicy::additive_only()
+        );
     }
 
     #[test]

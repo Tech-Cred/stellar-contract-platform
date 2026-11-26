@@ -47,7 +47,7 @@ pub struct CompatibilityRequest {
     pub old_wasm_base64: String,
     /// Base64-encoded updated artifact.
     pub new_wasm_base64: String,
-    /// Policy name: `strict` (default) or `lenient`.
+    /// Policy name: `strict` (default), `additive-only`, or `lenient`.
     #[serde(default = "default_policy")]
     pub policy: String,
 }
