@@ -13,18 +13,26 @@ with reasons. It is intentionally not a boolean.
 
 ## Policy rules
 
-| Rule | Strict (default) | Lenient |
-| ---- | ---------------- | ------- |
-| Removing a function | incompatible | note |
-| Changing a function signature | incompatible | note |
-| Removing a type | incompatible | note |
-| Renaming a type (identical shape) | incompatible | note |
-| Changing a type definition | incompatible | note |
-| Removing an event | incompatible | note |
-| Renaming an event (identical shape) | incompatible | note |
-| Changing an event | incompatible | note |
-| Adding a function, type, or event | compatible | compatible |
-| Documentation-only change | compatible | compatible |
+| Rule | Strict (default) | Additive-only | Lenient |
+| ---- | ---------------- | ------------- | ------- |
+| Removing a function | incompatible | incompatible | note |
+| Changing a function signature | incompatible | incompatible | note |
+| Removing a type | incompatible | incompatible | note |
+| Renaming a type (identical shape) | incompatible | incompatible | note |
+| Changing a type definition | incompatible | incompatible | note |
+| Removing an event | incompatible | incompatible | note |
+| Renaming an event (identical shape) | incompatible | incompatible | note |
+| Changing an event | incompatible | incompatible | note |
+| Adding a function, type, or event | compatible | compatible | compatible |
+| Documentation-only change | compatible | compatible | compatible |
+
+`--policy additive-only` (also accepted as `additive_only`) states the
+additive-evolution contract explicitly: callers may add functions, types, or
+events without a version bump, but may not remove, rename, or modify any
+existing surface. Its rule values match `strict` today; the named preset makes
+that guarantee reviewable instead of leaving it to be inferred from six
+booleans. An empty baseline still yields `unknown`, because there is no existing
+surface to add to.
 
 Relaxing a rule does **not** hide the change: it is reported as a non-breaking
 note with its path and explanation.
@@ -56,10 +64,10 @@ event_removal_is_breaking = false
 event_change_is_breaking = false
 ```
 
-A document that sets every rule to `true` is equivalent to
-`--policy strict`; setting every rule to `false` is equivalent to
-`--policy lenient`. The presets keep working. `--policy` and `--policy-file`
-cannot be used together.
+A document that sets every rule to `true` is equivalent to both
+`--policy strict` and `--policy additive-only`; setting every rule to `false`
+is equivalent to `--policy lenient`. The presets keep working. `--policy` and
+`--policy-file` cannot be used together.
 
 An unknown field, a missing field, or a non-boolean value is an invalid-policy
 error (exit code `2`) whose message names the field. The JSON report echoes the

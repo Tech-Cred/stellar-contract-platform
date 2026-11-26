@@ -126,7 +126,7 @@ enum Command {
         old: PathBuf,
         /// Updated contract WASM.
         new: PathBuf,
-        /// Compatibility policy: `strict` or `lenient` (overrides the project config).
+        /// Compatibility policy: `strict`, `additive-only`, or `lenient` (overrides the project config).
         #[arg(long, conflicts_with = "policy_file")]
         policy: Option<String>,
         /// Compatibility policy document (`.yml`, `.yaml`, `.toml`, or `.json`).
@@ -568,10 +568,13 @@ fn run(cli: &Cli, format: OutputFormat) -> Result<ObservatoryExit> {
             } else {
                 match policy.as_deref() {
                     Some("strict") => observatory_platform::CompatibilityPolicy::strict(),
+                    Some("additive-only" | "additive_only") => {
+                        observatory_platform::CompatibilityPolicy::additive_only()
+                    }
                     Some("lenient") => observatory_platform::CompatibilityPolicy::lenient(),
                     Some(other) => {
                         return Err(ObservatoryError::invalid(format!(
-                            "unknown policy `{other}`; expected strict or lenient"
+                            "unknown policy `{other}`; expected strict, additive-only, or lenient"
                         )))
                     }
                     None => project.compatibility_policy_for(cli.profile.as_deref())?,

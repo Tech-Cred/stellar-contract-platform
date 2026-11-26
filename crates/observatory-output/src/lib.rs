@@ -191,6 +191,12 @@ mod tests {
                     "analyses_total": 7,
                     "errors_total": 3,
                     "rate_limited_total": 0,
+                    "auth_failures": {
+                        "insufficient_permission": 0,
+                        "invalid_key": 3,
+                        "missing_key": 1,
+                    },
+                    "rate_limit_rejections": { "window_exceeded": 0 },
                 }),
             ),
             (

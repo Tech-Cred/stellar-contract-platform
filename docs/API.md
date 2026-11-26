@@ -166,18 +166,25 @@ Aggregate request counters in the Prometheus text exposition format
 # HELP observatory_api_requests_total Total HTTP requests handled.
 # TYPE observatory_api_requests_total counter
 observatory_api_requests_total 42
+# HELP observatory_api_auth_failures_invalid_key_total Authentication failures by reason.
+# TYPE observatory_api_auth_failures_invalid_key_total counter
+observatory_api_auth_failures_invalid_key_total 3
 ```
 
 `?format=json` returns the same counters in the standard report envelope:
 
 ```json
-{ "schema_version": "1.0", "kind": "metrics", "tool": "stellar-contract-platform", "version": "0.1.0", "data": { "requests_total": 42, "analyses_total": 7, "errors_total": 3, "rate_limited_total": 0 } }
+{ "schema_version": "1.0", "kind": "metrics", "tool": "stellar-contract-platform", "version": "0.1.0", "data": { "requests_total": 42, "analyses_total": 7, "errors_total": 3, "rate_limited_total": 1, "auth_failures": { "insufficient_permission": 0, "invalid_key": 3, "missing_key": 1 }, "rate_limit_rejections": { "window_exceeded": 1 } } }
 ```
 
 Counters are process-local and monotonic. They cover every handled request,
 successful contract analyses, responses with a `4xx`/`5xx` status, and requests
-rejected by the rate limiter. The exposition is deterministic and contains no
-secrets.
+rejected by the rate limiter. Security counters are keyed by a fixed set of
+reasons: authentication failures use `missing_key`, `invalid_key`, and
+`insufficient_permission`; rate-limit rejections use `window_exceeded`. Reason
+names are enum constants, not caller-supplied strings, so the counter maps are
+bounded and cannot contain keys, tokens, paths, or other secret material. The
+exposition is deterministic and contains no secrets.
 
 ### `POST /api/v1/keys` (admin)
 Creates an API key. Requires `manage_keys`.
@@ -194,6 +201,33 @@ are never included.
 Revokes a key. Requires `manage_keys`. Revocation takes effect immediately; the
 next request with that key receives `401`. An unknown id returns `404`.
 
+### `POST /api/v1/keys/{id}/rotate` (admin)
+Rotates a key without rotating every credential at once. Requires
+`manage_keys`. Body:
+
+```json
+{ "confirm": true, "label": "ci-rotated", "scopes": ["run_analysis"], "grace_period_secs": 60 }
+```
+
+Only `confirm` is required; it must be `true`. The replacement inherits the old
+key's role, label, and scopes unless `label` or `scopes` is supplied, and its
+secret is freshly generated. The response contains the new plaintext exactly
+once, the new id, and `old_key_revoked_at`.
+
+**Workflow**
+
+1. Call rotate with the old key id. Use `grace_period_secs` to keep the old key
+   valid while clients are updated; omit it (or use `0`) to revoke immediately.
+2. Deploy the returned plaintext to the client and verify it authenticates.
+3. During the grace window both keys work. On the first request at or after
+   `old_key_revoked_at`, the old key is revoked and an audit event with outcome
+   `grace_expired` is recorded.
+4. If no grace period was requested, the old key is revoked before the response
+   is returned.
+
+An unknown or already-revoked id returns `404`. Invalid input returns `400`.
+No plaintext or hash is written to the key store during rotation.
+
 ### `POST /api/v1/contracts/inspect`
 Body: `{ "wasm_base64": "...", "security": false }`.
 Returns the WASM report, the canonical interface (when present), and the audit
@@ -208,8 +242,9 @@ interface diff.
 
 ### `POST /api/v1/contracts/compatibility`
 Body: `{ "old_wasm_base64": "...", "new_wasm_base64": "...", "policy": "strict" }`.
-Returns the compatibility assessment. `policy` is `strict` (default) or
-`lenient`.
+Returns the compatibility assessment. `policy` is `strict` (default),
+`additive-only`, or `lenient`; `additive-only` accepts additions and treats
+removals, renames, and modifications as breaking.
 
 ### `POST /api/v1/contracts/fingerprint`
 Body: `{ "wasm_base64": "..." }`. Returns artifact and interface fingerprints.

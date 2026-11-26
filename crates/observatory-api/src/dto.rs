@@ -47,7 +47,7 @@ pub struct CompatibilityRequest {
     pub old_wasm_base64: String,
     /// Base64-encoded updated artifact.
     pub new_wasm_base64: String,
-    /// Policy name: `strict` (default) or `lenient`.
+    /// Policy name: `strict` (default), `additive-only`, or `lenient`.
     #[serde(default = "default_policy")]
     pub policy: String,
 }
@@ -110,6 +110,24 @@ pub struct CreateKeyRequest {
     pub scopes: Option<Vec<String>>,
     /// Human-readable label.
     pub label: String,
+}
+
+/// Request body for rotating an existing API key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotateKeyRequest {
+    /// Explicit confirmation that the old credential will be replaced.
+    pub confirm: bool,
+    /// Optional replacement label; the old label is kept when omitted.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Optional scopes overriding the old key's scopes.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    /// Grace period in seconds before the old key is revoked. Omit or pass
+    /// zero to revoke immediately.
+    #[serde(default)]
+    pub grace_period_secs: Option<u64>,
 }
 
 /// Request body for creating a webhook subscription.

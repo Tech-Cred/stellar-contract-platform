@@ -68,9 +68,11 @@ opt-in and offline; there is no live network path in the unit test suite.
 Diff two contract interfaces. Changes are classified as breaking,
 non-breaking, or informational. Always exits `0`.
 
-### `compat <OLD> <NEW> [--policy strict|lenient] [--policy-file <FILE>]`
+### `compat <OLD> <NEW> [--policy strict|additive-only|lenient] [--policy-file <FILE>]`
 
-Assess compatibility under a documented policy. Exits `6` when incompatible.
+Assess compatibility under a documented policy. `additive-only` accepts
+additions and rejects removals, renames, and modifications. Exits `6` when
+incompatible.
 `--policy-file` loads explicit rules from a `.yml`, `.yaml`, `.toml`, or `.json`
 document; see [compatibility.md](compatibility.md).
 

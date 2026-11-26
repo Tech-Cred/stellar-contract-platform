@@ -120,7 +120,7 @@ pub fn document() -> Value {
                         "new_wasm_base64": { "type": "string" },
                         "policy": {
                             "type": "string",
-                            "enum": ["strict", "lenient"],
+                            "enum": ["strict", "additive-only", "lenient"],
                             "default": "strict"
                         }
                     }
@@ -185,6 +185,37 @@ pub fn document() -> Value {
                                     "manage_keys"
                                 ]
                             }
+                        }
+                    }
+                },
+                "RotateKeyRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["confirm"],
+                    "properties": {
+                        "confirm": {
+                            "type": "boolean",
+                            "enum": [true],
+                            "description": "Explicit confirmation that the old key will be replaced."
+                        },
+                        "label": { "type": ["string", "null"], "minLength": 1 },
+                        "scopes": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "read_health",
+                                    "read_version",
+                                    "run_analysis",
+                                    "manage_webhooks",
+                                    "manage_keys"
+                                ]
+                            }
+                        },
+                        "grace_period_secs": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                            "description": "Seconds the old key remains valid after rotation."
                         }
                     }
                 },
@@ -328,6 +359,7 @@ fn request_schema_for(path: &str) -> Option<&'static str> {
         "/api/v1/jobs" => Some("CreateJobRequest"),
         "/api/v1/jobs/cancel" => Some("CancelJobRequest"),
         "/api/v1/keys" => Some("CreateKeyRequest"),
+        "/api/v1/keys/{id}/rotate" => Some("RotateKeyRequest"),
         "/api/v1/webhooks" => Some("CreateWebhookRequest"),
         "/api/v1/webhooks/{id}" => Some("UpdateWebhookRequest"),
         _ => None,
@@ -369,6 +401,7 @@ fn summary_for(path: &str) -> &'static str {
         "/api/v1/audit/events" => "Read the structured audit log",
         "/api/v1/keys" => "Create or list API keys",
         "/api/v1/keys/{id}" => "Revoke an API key",
+        "/api/v1/keys/{id}/rotate" => "Rotate an API key",
         "/api/v1/webhooks" => "List or create webhook subscriptions",
         "/api/v1/webhooks/{id}" => "Read, update, or delete a webhook subscription",
         _ => "Operation",
@@ -452,7 +485,7 @@ mod tests {
         let compatibility = &document["components"]["schemas"]["CompatibilityRequest"];
         assert_eq!(
             compatibility["properties"]["policy"]["enum"],
-            json!(["strict", "lenient"])
+            json!(["strict", "additive-only", "lenient"])
         );
     }
 

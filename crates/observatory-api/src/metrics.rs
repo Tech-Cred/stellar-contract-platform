@@ -3,18 +3,20 @@
 //! The counters are deliberately aggregate and secret-free: they record
 //! request volume and outcomes only, never endpoints, keys, or payloads. The
 //! exposition is deterministic for a given snapshot so it can be asserted in
-//! structural tests.
+//! structural tests. Security events are keyed by a fixed set of reason names.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use observatory_platform::{AuthFailureReason, RateLimitReason, SecurityMetrics};
 use serde::Serialize;
 
 /// The Prometheus text exposition content type.
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 /// A point-in-time view of the API counters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MetricsSnapshot {
     /// Every HTTP request handled, including the metrics scrape itself.
     pub requests_total: u64,
@@ -24,12 +26,18 @@ pub struct MetricsSnapshot {
     pub errors_total: u64,
     /// Requests rejected by the rate limiter.
     pub rate_limited_total: u64,
+    /// Authentication failures by stable, secret-free reason.
+    pub auth_failures: BTreeMap<String, u64>,
+    /// Rate-limit rejections by stable, secret-free reason.
+    pub rate_limit_rejections: BTreeMap<String, u64>,
 }
 
 impl MetricsSnapshot {
     /// Render the snapshot in the Prometheus text exposition format.
     ///
     /// Output is stable: the same snapshot always produces the same bytes.
+    /// Reason names are embedded in metric names rather than labels, so the
+    /// exposition stays a flat list of counters and cannot leak caller data.
     #[must_use]
     pub fn to_prometheus(&self) -> String {
         let mut out = String::new();
@@ -57,6 +65,22 @@ impl MetricsSnapshot {
             "Requests rejected by the rate limiter.",
             self.rate_limited_total,
         );
+        for (reason, value) in &self.auth_failures {
+            write_counter(
+                &mut out,
+                &format!("observatory_api_auth_failures_{reason}_total"),
+                "Authentication failures by reason.",
+                *value,
+            );
+        }
+        for (reason, value) in &self.rate_limit_rejections {
+            write_counter(
+                &mut out,
+                &format!("observatory_api_rate_limit_rejections_{reason}_total"),
+                "Rate-limit rejections by reason.",
+                *value,
+            );
+        }
         out
     }
 }
@@ -74,6 +98,7 @@ pub struct Metrics {
     analyses: AtomicU64,
     errors: AtomicU64,
     rate_limited: AtomicU64,
+    security: SecurityMetrics,
 }
 
 impl Metrics {
@@ -102,14 +127,27 @@ impl Metrics {
         }
     }
 
+    /// Record an authentication failure without retaining any secret.
+    pub fn record_auth_failure(&self, reason: AuthFailureReason) {
+        self.security.record_auth_failure(reason);
+    }
+
+    /// Record a rate-limit rejection without retaining any caller identity.
+    pub fn record_rate_limit_rejection(&self, reason: RateLimitReason) {
+        self.security.record_rate_limit_rejection(reason);
+    }
+
     /// Take a consistent-enough snapshot of the counters.
     #[must_use]
     pub fn snapshot(&self) -> MetricsSnapshot {
+        let security = self.security.snapshot();
         MetricsSnapshot {
             requests_total: self.requests.load(Ordering::Relaxed),
             analyses_total: self.analyses.load(Ordering::Relaxed),
             errors_total: self.errors.load(Ordering::Relaxed),
             rate_limited_total: self.rate_limited.load(Ordering::Relaxed),
+            auth_failures: security.auth_failures,
+            rate_limit_rejections: security.rate_limit_rejections,
         }
     }
 }
@@ -125,6 +163,7 @@ mod tests {
             analyses_total: 3,
             errors_total: 2,
             rate_limited_total: 1,
+            ..MetricsSnapshot::default()
         };
         let text = snapshot.to_prometheus();
         assert!(text.contains("# HELP observatory_api_requests_total"));
@@ -141,6 +180,7 @@ mod tests {
             analyses_total: 2,
             errors_total: 3,
             rate_limited_total: 4,
+            ..MetricsSnapshot::default()
         };
         assert_eq!(snapshot.to_prometheus(), snapshot.to_prometheus());
     }
@@ -157,5 +197,19 @@ mod tests {
         assert_eq!(snapshot.analyses_total, 1);
         assert_eq!(snapshot.errors_total, 1);
         assert_eq!(snapshot.rate_limited_total, 1);
+    }
+
+    #[test]
+    fn security_counters_are_exposed_by_reason() {
+        let metrics = Metrics::new();
+        metrics.record_auth_failure(AuthFailureReason::InvalidKey);
+        metrics.record_rate_limit_rejection(RateLimitReason::WindowExceeded);
+        let snapshot = metrics.snapshot();
+
+        assert_eq!(snapshot.auth_failures["invalid_key"], 1);
+        assert_eq!(snapshot.rate_limit_rejections["window_exceeded"], 1);
+        let text = snapshot.to_prometheus();
+        assert!(text.contains("\nobservatory_api_auth_failures_invalid_key_total 1\n"));
+        assert!(text.contains("\nobservatory_api_rate_limit_rejections_window_exceeded_total 1\n"));
     }
 }

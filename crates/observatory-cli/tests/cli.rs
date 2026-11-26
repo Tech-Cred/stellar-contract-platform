@@ -1046,6 +1046,41 @@ fn policy_file_selects_rules_and_echoes_the_resolved_policy() {
 }
 
 #[test]
+fn additive_only_policy_accepts_additions_and_rejects_removals() {
+    let base = write_temp(&module_with_spec(&[spec_function("a", &[], None)]), ".wasm");
+    let extended = write_temp(
+        &module_with_spec(&[spec_function("a", &[], None), spec_function("b", &[], None)]),
+        ".wasm",
+    );
+    binary()
+        .args([
+            "compat",
+            base.path().to_str().unwrap(),
+            extended.path().to_str().unwrap(),
+            "--policy",
+            "additive-only",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"compatible\""))
+        .stdout(predicate::str::contains(
+            "\"function_removal_is_breaking\": true",
+        ));
+
+    binary()
+        .args([
+            "compat",
+            extended.path().to_str().unwrap(),
+            base.path().to_str().unwrap(),
+            "--policy",
+            "additive-only",
+        ])
+        .assert()
+        .code(6);
+}
+
+#[test]
 fn verify_batch_reports_aggregate_status_from_a_manifest() {
     let wasm = module_with_spec(&[spec_function("hello", &[], Some(ScSpecTypeDef::Bool))]);
     let wasm_file = write_temp(&wasm, ".wasm");

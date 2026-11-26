@@ -47,6 +47,23 @@ pub struct Principal {
     pub scopes: Option<Vec<Permission>>,
 }
 
+/// Metadata describing one completed key rotation.
+///
+/// The new plaintext is returned separately and is never stored in this
+/// struct, so debug logs and serialized responses cannot leak it by accident.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyRotation {
+    /// The id of the key being replaced.
+    pub old_id: String,
+    /// Metadata for the freshly generated replacement key.
+    pub new_record: ApiKeyRecord,
+    /// Seconds from the Unix epoch when the old key is revoked. Equal to the
+    /// rotation time when no grace period was requested.
+    pub revoke_at: u64,
+    /// The requested grace period, or `None` for immediate revocation.
+    pub grace_period_secs: Option<u64>,
+}
+
 /// A pluggable API-key store.
 ///
 /// Implementations must never store or log the plaintext key. The in-memory
@@ -73,6 +90,24 @@ pub trait KeyStore: Send + Sync {
     fn revoke(&mut self, id: &str) -> bool;
     /// Change a live key's role.
     fn set_role(&mut self, id: &str, role: Role) -> bool;
+    /// Create a fresh replacement for `id` with the same role.
+    ///
+    /// `label` and `scopes` override the old key's metadata when supplied.
+    /// With no grace period the old key is revoked immediately; otherwise it
+    /// stays valid until `revoke_at`. Returns `None` when the id is unknown or
+    /// already revoked.
+    fn rotate(
+        &mut self,
+        id: &str,
+        label: Option<&str>,
+        scopes: Option<Vec<Permission>>,
+        grace_period_secs: Option<u64>,
+        now_secs: u64,
+    ) -> Result<Option<(String, KeyRotation)>>;
+    /// Revoke keys whose rotation grace period has elapsed.
+    ///
+    /// Returns the revoked ids so callers can audit the transition.
+    fn revoke_expired(&mut self, now_secs: u64) -> Vec<String>;
     /// Authenticate a presented key.
     fn authenticate(&self, provided: &str) -> Option<Principal>;
     /// List key metadata, sorted by id. Records never serialize the hash.
@@ -89,6 +124,9 @@ pub trait KeyStore: Send + Sync {
 #[derive(Debug, Default)]
 pub struct ApiKeyStore {
     keys: BTreeMap<String, ApiKeyRecord>,
+    // Old key id -> epoch seconds at which rotation revokes it. `pub(crate)`
+    // lets the file-backed store persist pending grace periods.
+    pub(crate) pending_revocations: BTreeMap<String, u64>,
 }
 
 impl ApiKeyStore {
@@ -213,6 +251,77 @@ impl ApiKeyStore {
         }
     }
 
+    /// Create a fresh replacement for `id`.
+    ///
+    /// The old key is revoked immediately unless a grace period is supplied.
+    /// The replacement inherits the old role, label, and scopes unless they are
+    /// explicitly overridden. The new plaintext is returned exactly once.
+    pub fn rotate(
+        &mut self,
+        id: &str,
+        label: Option<&str>,
+        scopes: Option<Vec<Permission>>,
+        grace_period_secs: Option<u64>,
+        now_secs: u64,
+    ) -> Result<Option<(String, KeyRotation)>> {
+        let (role, effective_label, effective_scopes, old_hash) = {
+            let Some(record) = self.keys.get(id) else {
+                return Ok(None);
+            };
+            if record.revoked {
+                return Ok(None);
+            }
+            let role = record.role;
+            let effective_label = label.unwrap_or(&record.label).to_string();
+            let effective_scopes = scopes.or_else(|| record.scopes.clone());
+            let old_hash = record.hash.clone();
+            (role, effective_label, effective_scopes, old_hash)
+        };
+
+        let (plaintext, new_record) = self.generate(role, &effective_label, effective_scopes)?;
+        if new_record.hash == old_hash {
+            self.keys.remove(&new_record.id);
+            return Err(ObservatoryError::internal(
+                "rotation produced a repeated secret",
+            ));
+        }
+
+        let revoke_at = grace_period_secs.map_or(now_secs, |grace| now_secs.saturating_add(grace));
+        let rotation = KeyRotation {
+            old_id: id.to_string(),
+            new_record: new_record.clone(),
+            revoke_at,
+            grace_period_secs,
+        };
+        if revoke_at <= now_secs {
+            self.revoke(id);
+        } else {
+            self.pending_revocations.insert(id.to_string(), revoke_at);
+        }
+        Ok(Some((plaintext, rotation)))
+    }
+
+    /// Revoke keys whose rotation grace period has elapsed.
+    pub fn revoke_expired(&mut self, now_secs: u64) -> Vec<String> {
+        let due: Vec<String> = self
+            .pending_revocations
+            .iter()
+            .filter(|(_, revoke_at)| **revoke_at <= now_secs)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut revoked = Vec::new();
+        for id in due {
+            self.pending_revocations.remove(&id);
+            if let Some(record) = self.keys.get_mut(&id) {
+                if !record.revoked {
+                    record.revoked = true;
+                    revoked.push(id);
+                }
+            }
+        }
+        revoked
+    }
+
     /// Key metadata, sorted by id.
     ///
     /// The returned records carry the hash in memory, but [`ApiKeyRecord`]
@@ -289,6 +398,21 @@ impl KeyStore for ApiKeyStore {
         ApiKeyStore::set_role(self, id, role)
     }
 
+    fn rotate(
+        &mut self,
+        id: &str,
+        label: Option<&str>,
+        scopes: Option<Vec<Permission>>,
+        grace_period_secs: Option<u64>,
+        now_secs: u64,
+    ) -> Result<Option<(String, KeyRotation)>> {
+        ApiKeyStore::rotate(self, id, label, scopes, grace_period_secs, now_secs)
+    }
+
+    fn revoke_expired(&mut self, now_secs: u64) -> Vec<String> {
+        ApiKeyStore::revoke_expired(self, now_secs)
+    }
+
     fn authenticate(&self, provided: &str) -> Option<Principal> {
         ApiKeyStore::authenticate(self, provided)
     }
@@ -333,6 +457,79 @@ mod tests {
         assert!(store.revoke(&record.id));
         assert!(store.authenticate(&plaintext).is_none());
         assert!(!store.revoke("missing"));
+    }
+
+    #[test]
+    fn rotation_creates_a_fresh_key_and_revokes_the_old_one() {
+        let mut store = ApiKeyStore::new();
+        let (old_plaintext, old_record) = store
+            .generate(Role::Developer, "ci", Some(vec![Permission::RunAnalysis]))
+            .unwrap();
+        let (new_plaintext, rotation) = store
+            .rotate(&old_record.id, None, None, None, 10)
+            .unwrap()
+            .expect("rotation succeeds");
+
+        assert_ne!(old_plaintext, new_plaintext);
+        assert_ne!(old_record.hash, rotation.new_record.hash);
+        assert_eq!(rotation.old_id, old_record.id);
+        assert_eq!(rotation.revoke_at, 10);
+        assert_eq!(rotation.grace_period_secs, None);
+        assert_eq!(rotation.new_record.role, Role::Developer);
+        assert_eq!(rotation.new_record.scopes, old_record.scopes);
+        assert_eq!(rotation.new_record.label, old_record.label);
+        assert_eq!(
+            store.authenticate(&new_plaintext).unwrap().role,
+            Role::Developer
+        );
+        assert!(store.authenticate(&old_plaintext).is_none());
+        assert!(store
+            .rotate(&old_record.id, None, None, None, 10)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn rotation_grace_period_delays_revocation_until_expiry() {
+        let mut store = ApiKeyStore::new();
+        let (old_plaintext, old_record) = store.generate(Role::Admin, "ops", None).unwrap();
+        let (new_plaintext, rotation) = store
+            .rotate(&old_record.id, None, None, Some(60), 100)
+            .unwrap()
+            .expect("rotation succeeds");
+
+        assert_eq!(rotation.revoke_at, 160);
+        assert_eq!(rotation.grace_period_secs, Some(60));
+        assert!(store.authenticate(&old_plaintext).is_some());
+        assert!(store.authenticate(&new_plaintext).is_some());
+        assert!(store.revoke_expired(159).is_empty());
+        assert!(store.authenticate(&old_plaintext).is_some());
+        assert_eq!(store.revoke_expired(160), vec![old_record.id]);
+        assert!(store.authenticate(&old_plaintext).is_none());
+        assert!(store.authenticate(&new_plaintext).is_some());
+        assert!(store.revoke_expired(160).is_empty());
+    }
+
+    #[test]
+    fn rotation_can_override_label_and_scopes() {
+        let mut store = ApiKeyStore::new();
+        let (_, old_record) = store.generate(Role::Developer, "ci", None).unwrap();
+        let (_, rotation) = store
+            .rotate(
+                &old_record.id,
+                Some("ci-rotated"),
+                Some(vec![Permission::ReadVersion]),
+                None,
+                0,
+            )
+            .unwrap()
+            .expect("rotation succeeds");
+
+        assert_eq!(rotation.new_record.label, "ci-rotated");
+        assert_eq!(
+            rotation.new_record.scopes,
+            Some(vec![Permission::ReadVersion])
+        );
     }
 
     #[test]

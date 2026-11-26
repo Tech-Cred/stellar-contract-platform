@@ -22,6 +22,20 @@
 //! | Adding a function, type, or event | compatible |
 //! | Documentation-only changes | compatible (informational) |
 //!
+//! # Presets
+//!
+//! Three named presets are available:
+//!
+//! * [`CompatibilityPolicy::strict`] treats removals and modifications as
+//!   breaking, and additions as compatible.
+//! * [`CompatibilityPolicy::lenient`] treats every change as a non-breaking
+//!   note.
+//! * [`CompatibilityPolicy::additive_only`] states the additive-only contract
+//!   explicitly: additions are compatible, while **every** removal or
+//!   modification is breaking. Its rule values match `strict` today, but its
+//!   name and documentation pin the intended evolutionary guarantee so callers
+//!   do not have to infer it from six booleans.
+//!
 //! Any of the removal/modification rules can be relaxed through
 //! [`CompatibilityPolicy`]. Relaxing a rule does not make the change disappear;
 //! it is reported as a non-breaking note.
@@ -81,6 +95,18 @@ impl CompatibilityPolicy {
             event_removal_is_breaking: true,
             event_change_is_breaking: true,
         }
+    }
+
+    /// An additive-only evolution policy.
+    ///
+    /// Additions of functions, types, and events are compatible. Removals,
+    /// renames, and modifications of existing functions, types, and events are
+    /// breaking, as under [`CompatibilityPolicy::strict`]. The preset names the
+    /// guarantee explicitly: callers may add surface area without a version
+    /// bump, but must never take existing surface away.
+    #[must_use]
+    pub fn additive_only() -> Self {
+        CompatibilityPolicy::strict()
     }
 
     /// A lenient policy that treats all changes as non-breaking notes.
@@ -255,6 +281,104 @@ mod tests {
             assess(&old, &new, CompatibilityPolicy::default()).status,
             CompatibilityStatus::Incompatible
         );
+    }
+
+    #[test]
+    fn additive_only_policy_classifies_every_change_kind() {
+        let policy = CompatibilityPolicy::additive_only();
+        for kind in [
+            ChangeKind::FunctionAdded,
+            ChangeKind::TypeAdded,
+            ChangeKind::EventAdded,
+        ] {
+            assert!(
+                !policy.is_breaking(kind),
+                "addition {kind:?} must be compatible"
+            );
+        }
+        for kind in [
+            ChangeKind::FunctionRemoved,
+            ChangeKind::FunctionRenamed,
+            ChangeKind::FunctionChanged,
+            ChangeKind::TypeRemoved,
+            ChangeKind::TypeRenamed,
+            ChangeKind::TypeChanged,
+            ChangeKind::EventRemoved,
+            ChangeKind::EventRenamed,
+            ChangeKind::EventChanged,
+        ] {
+            assert!(policy.is_breaking(kind), "change {kind:?} must be breaking");
+        }
+        assert_eq!(policy, CompatibilityPolicy::strict());
+    }
+
+    #[test]
+    fn additive_only_policy_accepts_additions_only() {
+        let base = vec![
+            spec_function("a", &[], None),
+            spec_struct("S", &[("a", ScSpecTypeDef::U32)]),
+            spec_event("e", &[], &[]),
+        ];
+
+        let extended = interface(vec![
+            spec_function("a", &[], None),
+            spec_function("b", &[], None),
+            spec_struct("S", &[("a", ScSpecTypeDef::U32)]),
+            spec_struct("T", &[("a", ScSpecTypeDef::U32)]),
+            spec_event("e", &[], &[]),
+            spec_event("f", &[], &[]),
+        ]);
+        let assessment = assess(
+            &interface(base.clone()),
+            &extended,
+            CompatibilityPolicy::additive_only(),
+        );
+        assert_eq!(assessment.status, CompatibilityStatus::Compatible);
+        assert!(assessment.reasons.iter().all(|reason| !reason.breaking));
+
+        let without_function = interface(vec![
+            spec_struct("S", &[("a", ScSpecTypeDef::U32)]),
+            spec_event("e", &[], &[]),
+        ]);
+        let without_type = interface(vec![
+            spec_function("a", &[], None),
+            spec_event("e", &[], &[]),
+        ]);
+        let without_event = interface(vec![
+            spec_function("a", &[], None),
+            spec_struct("S", &[("a", ScSpecTypeDef::U32)]),
+        ]);
+        let changed_function = interface(vec![
+            spec_function("a", &[("x", ScSpecTypeDef::U64)], None),
+            spec_struct("S", &[("a", ScSpecTypeDef::U32)]),
+            spec_event("e", &[], &[]),
+        ]);
+        let changed_type = interface(vec![
+            spec_function("a", &[], None),
+            spec_struct("S", &[("a", ScSpecTypeDef::U64)]),
+            spec_event("e", &[], &[]),
+        ]);
+        let changed_event = interface(vec![
+            spec_function("a", &[], None),
+            spec_struct("S", &[("a", ScSpecTypeDef::U32)]),
+            spec_event("e", &["changed"], &[]),
+        ]);
+        for new in [
+            without_function,
+            without_type,
+            without_event,
+            changed_function,
+            changed_type,
+            changed_event,
+        ] {
+            let assessment = assess(
+                &interface(base.clone()),
+                &new,
+                CompatibilityPolicy::additive_only(),
+            );
+            assert_eq!(assessment.status, CompatibilityStatus::Incompatible);
+            assert!(assessment.reasons.iter().any(|reason| reason.breaking));
+        }
     }
 
     #[test]

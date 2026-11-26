@@ -69,11 +69,11 @@ impl NetworkProfile {
         }
         if let Some(policy) = &self.policy {
             match policy.as_str() {
-                "strict" | "lenient" => {}
+                "strict" | "additive-only" | "additive_only" | "lenient" => {}
                 other => {
                     return Err(ObservatoryError::invalid(format!(
                         "unknown compatibility policy `{other}` in profile; \
-                         expected strict or lenient"
+                         expected strict, additive-only, or lenient"
                     )))
                 }
             }
