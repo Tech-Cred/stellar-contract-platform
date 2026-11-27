@@ -265,6 +265,7 @@ export interface CompatibilityPolicy {
   signature_change_is_breaking: boolean;
   type_removal_is_breaking: boolean;
   type_change_is_breaking: boolean;
+  enum_case_addition_is_breaking: boolean;
   event_removal_is_breaking: boolean;
   event_change_is_breaking: boolean;
 }

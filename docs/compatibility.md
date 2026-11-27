@@ -20,6 +20,7 @@ with reasons. It is intentionally not a boolean.
 | Removing a type | incompatible | note |
 | Renaming a type (identical shape) | incompatible | note |
 | Changing a type definition | incompatible | note |
+| Adding an enum case | incompatible (default) | note |
 | Removing an event | incompatible | note |
 | Renaming an event (identical shape) | incompatible | note |
 | Changing an event | incompatible | note |
@@ -28,6 +29,21 @@ with reasons. It is intentionally not a boolean.
 
 Relaxing a rule does **not** hide the change: it is reported as a non-breaking
 note with its path and explanation.
+
+### Enum case additions
+
+`enum_case_addition_is_breaking` governs only the addition of a case to an
+existing enum or error enum. It defaults to `true` (breaking under `strict`) and
+is `false` under `lenient`. The default is deliberate: adding a variant can break
+consumers with exhaustive matches, fixed discriminants, or stored numeric values.
+Teams that treat enums as open can set the flag to `false`. The flag does not
+affect struct or union changes, enum case removals, value changes, type renames,
+or any function/event rule; `type_change_is_breaking` still covers those other
+type changes.
+
+The diff reports an addition as `enum_case_added` only when every existing case
+keeps its name, value, and relative order. Otherwise the change stays
+`type_changed` and follows `type_change_is_breaking`.
 
 ## Policy document
 
@@ -41,6 +57,7 @@ function_removal_is_breaking: true
 signature_change_is_breaking: true
 type_removal_is_breaking: true
 type_change_is_breaking: true
+enum_case_addition_is_breaking: true
 event_removal_is_breaking: true
 event_change_is_breaking: true
 ```
@@ -52,6 +69,7 @@ function_removal_is_breaking = false
 signature_change_is_breaking = false
 type_removal_is_breaking = false
 type_change_is_breaking = false
+enum_case_addition_is_breaking = false
 event_removal_is_breaking = false
 event_change_is_breaking = false
 ```

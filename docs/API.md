@@ -421,8 +421,8 @@ references and required fields stay in sync.
 
 ## Client SDKs
 
-Typed Rust and TypeScript clients live under `crates/observatory-client` and
-`sdks/typescript`; see [`sdk.md`](sdk.md).
+Typed Rust, TypeScript, and Python clients live under `crates/observatory-client`,
+`sdks/typescript`, and `sdks/python`; see [`sdk.md`](sdk.md).
 
 ## Not included
 
