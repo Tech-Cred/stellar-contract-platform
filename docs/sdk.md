@@ -82,3 +82,37 @@ It exposes the same methods as the Rust client. Timeouts reject with
 `ApiError` carrying the stable `code`. Models mirror `docs/schemas/` and the
 OpenAPI document. Run the tests with `node --test` from `sdks/typescript`; see
 `sdks/typescript/README.md`.
+
+## Python client
+
+`sdks/python` is a standard-library-only client for Python 3.11 or newer. It uses
+frozen dataclasses for request bodies and `TypedDict` response models that mirror
+`docs/schemas/` and the OpenAPI document.
+
+```python
+from observatory_client import Client, InspectRequest
+
+client = Client("http://127.0.0.1:8080", api_key="sco_<id>_<secret>", timeout=10.0)
+report = client.inspect(InspectRequest(wasm=open("contract.wasm", "rb").read()))
+print(report["wasm"]["artifact_sha256"])
+```
+
+It exposes `health`, `readiness`, `version`, `inspect`, `spec`, `diff`,
+`compatibility`, `fingerprint`, and `security`. API keys are sent as `X-API-Key`
+and never logged or persisted by the client. Every request has a timeout and a
+response-size cap. Retries are opt-in (`max_retries`, capped at 5) and bounded by
+exponential backoff; only transport failures, timeouts, and retryable API
+responses are retried. `ApiError` preserves the stable `code`, HTTP `status`,
+optional `request_id`, and RPC details; unknown codes remain strings.
+
+The default tests use injected transports and no sockets. Integration tests are
+opt-in and start a real `api serve` on a loopback port with an ephemeral
+in-memory key:
+
+```bash
+cargo build -p observatory-cli
+RUN_OBSERVATORY_INTEGRATION=1 python -m pytest sdks/python/tests/test_integration.py
+```
+
+See `sdks/python/README.md` for configuration, error handling, and the runnable
+example.
