@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use observatory_core::error::redact_secrets;
-use observatory_core::hash::sha256_hex;
+use observatory_core::hash::{sha256_hex, HashAlgorithm};
 use observatory_core::{ObservatoryError, Result as CoreResult, SCHEMA_VERSION, TOOL_NAME};
 use observatory_output::report;
 use observatory_platform::{
@@ -23,8 +23,8 @@ use serde_json::Value;
 
 use crate::dto::{
     decode_wasm, CancelJobRequest, CompatibilityRequest, CreateJobRequest, CreateKeyRequest,
-    CreateWebhookRequest, DiffRequest, EventsRequest, InspectRequest, UpdateWebhookRequest,
-    WasmRequest,
+    CreateWebhookRequest, DiffRequest, EventsRequest, FingerprintRequest, InspectRequest,
+    UpdateWebhookRequest, WasmRequest,
 };
 use crate::errors::entry as error_entry;
 use crate::http::{Request, Response};
@@ -787,11 +787,16 @@ impl Api {
             }
             ("POST", "/api/v1/contracts/fingerprint") => {
                 self.require(principal, Permission::RunAnalysis)?;
-                let body: WasmRequest = parse_json(request)?;
+                let body: FingerprintRequest = parse_json(request)?;
+                let algorithm = match body.algorithm.as_deref() {
+                    Some(raw) => HashAlgorithm::parse(raw)
+                        .map_err(|error| ApiError::bad_request(error.to_string()))?,
+                    None => HashAlgorithm::Sha256,
+                };
                 let wasm = decode_wasm(&body.wasm_base64).map_err(ApiError::from)?;
                 let outcome = self
                     .observatory
-                    .fingerprint(&wasm)
+                    .fingerprint_with(&wasm, algorithm)
                     .map_err(ApiError::from)?;
                 Ok(response(200, "fingerprint", &outcome))
             }

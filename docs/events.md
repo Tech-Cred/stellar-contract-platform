@@ -83,9 +83,25 @@ An omitted filter is a no-op.
 | Flag | Behavior |
 | ---- | -------- |
 | `--contract <ID>` | Exact contract id match. Events without a contract id, including diagnostic events emitted outside a contract, never match. |
-| `--topic <TEXT>` | Substring match against extracted topic text (symbols/strings) or rendered topics. Works for diagnostic topics such as `fn_call` and `log`. |
+| `--topic <FILTER>` | Structured or legacy topic filter; see the syntax below. Works for diagnostic topics such as `fn_call` and `log`. |
 | `--type <TYPE>` | Case-insensitive event type match. `--type diagnostic` selects diagnostic events regardless of their contract id. |
 | `--limit <N>` | Applied last. |
+
+### Topic filter syntax
+
+| Form | Match |
+| ---- | ----- |
+| `--topic transfer` | Legacy substring match against extracted topic text (symbols/strings) or rendered topics. |
+| `--topic name=transfer` | Exact match against any extracted topic symbol or string. |
+| `--topic index0=transfer` | Exact match against the extracted symbol at zero-based position `0`. |
+
+Indices apply to `topic_symbols`, not the raw `topics` array. Only `ScVal::Symbol`
+and `ScVal::String` topics are extracted, so a non-symbol topic before a symbol
+does not consume an index. For example, a raw integer topic followed by
+`symbol("transfer")` has `index0=transfer`, not `index1=transfer`. Structured
+forms never fall back to rendered topic JSON, so matches are deterministic.
+Empty values, unknown prefixes such as `idx0=`, non-numeric or negative indices,
+and index overflow are rejected with a structured `invalid_input` error.
 
 Diagnostic events are filtered by the same rules as system and contract events.
 The only behavior worth calling out is the contract filter: it matches the
@@ -97,8 +113,8 @@ normalized fields and do not special-case diagnostic events.
 
 - Declared events (specification) and emitted events (fixture) are distinct.
   Declared events describe *shape*; fixtures contain *instances*.
-- Topics that are not symbols or strings cannot be text-filtered, but are still
-  matched against their rendered JSON.
+- Topics that are not symbols or strings are ignored by structured filters. The
+  legacy bare-text filter still matches their rendered JSON.
 - Historical event retrieval is opt-in and offline-only in the test suite. The
   `events --rpc-fixture` path reads a mock `getEvents` response, normalizes
   `contractId`/`ledger`/`txHash`/`type`/`topic`/`value`, and paginates using the

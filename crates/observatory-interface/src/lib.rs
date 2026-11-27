@@ -15,7 +15,7 @@
 //! interface can have different implementations, so interface equality does not
 //! imply implementation equality.
 
-use observatory_core::hash::sha256_hex;
+use observatory_core::hash::{hash_hex, HashAlgorithm};
 use observatory_core::{ObservatoryError, Result};
 use observatory_spec::{
     ContractSpec, SpecEnum, SpecErrorEnum, SpecEvent, SpecFunction, SpecStruct, SpecType, SpecUnion,
@@ -201,9 +201,16 @@ impl ContractInterface {
         })
     }
 
+    /// The deterministic fingerprint of the canonical interface with `algorithm`.
+    ///
+    /// The canonical bytes are unchanged; only the digest algorithm varies.
+    pub fn fingerprint_with(&self, algorithm: HashAlgorithm) -> Result<String> {
+        Ok(hash_hex(algorithm, &self.canonical_json()?))
+    }
+
     /// The deterministic SHA-256 fingerprint of the canonical interface.
     pub fn fingerprint(&self) -> Result<String> {
-        Ok(sha256_hex(&self.canonical_json()?))
+        self.fingerprint_with(HashAlgorithm::Sha256)
     }
 
     /// Reconstruct a normalized specification for validation or summarization.
@@ -545,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn known_fingerprint_vector() {
+    fn known_fingerprint_vectors() {
         let interface = ContractInterface::from_spec(spec(vec![spec_function(
             "ping",
             &[("n", ScSpecTypeDef::U32)],
@@ -554,6 +561,16 @@ mod tests {
         assert_eq!(
             interface.fingerprint().unwrap(),
             "55b4750964574865fa8ecb0a1b6c772fd9b666cf5e6f556832011ad1f3a0f1d4"
+        );
+        assert_eq!(
+            interface
+                .fingerprint_with(HashAlgorithm::Sha512)
+                .unwrap(),
+            "116f92f3d02039b45e5e2ac20dd22002c56d68b46e3b66e3505c01e4e87e3cff20d22889338eeb16f426f2dd582e09c0966d0645f313340177d87d236a9d04d7"
+        );
+        assert_eq!(
+            interface.fingerprint_with(HashAlgorithm::Sha256).unwrap(),
+            interface.fingerprint().unwrap()
         );
     }
 

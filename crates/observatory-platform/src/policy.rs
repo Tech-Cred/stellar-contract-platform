@@ -51,6 +51,7 @@ function_removal_is_breaking: false
 signature_change_is_breaking: false
 type_removal_is_breaking: false
 type_change_is_breaking: false
+struct_field_addition_is_breaking: false
 event_removal_is_breaking: false
 event_change_is_breaking: false
 ";
@@ -60,6 +61,20 @@ event_change_is_breaking: false
         let policy = parse_policy(STRICT_YAML, ConfigFormat::Yaml).unwrap();
         assert!(policy.function_removal_is_breaking);
         assert!(policy.event_change_is_breaking);
+    }
+
+    #[test]
+    fn struct_field_addition_rule_defaults_to_strict_when_omitted() {
+        let legacy = "\
+function_removal_is_breaking: true
+signature_change_is_breaking: true
+type_removal_is_breaking: true
+type_change_is_breaking: true
+event_removal_is_breaking: true
+event_change_is_breaking: true
+";
+        let parsed = parse_policy(legacy, ConfigFormat::Yaml).unwrap();
+        assert!(parsed.struct_field_addition_is_breaking);
     }
 
     #[test]
@@ -103,6 +118,7 @@ event_change_is_breaking: false
                 "signature_change_is_breaking": false,
                 "type_removal_is_breaking": false,
                 "type_change_is_breaking": false,
+                "struct_field_addition_is_breaking": false,
                 "event_removal_is_breaking": false,
                 "event_change_is_breaking": false
             }"#;

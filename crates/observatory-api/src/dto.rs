@@ -29,6 +29,17 @@ pub struct WasmRequest {
     pub wasm_base64: String,
 }
 
+/// Request body for fingerprinting.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FingerprintRequest {
+    /// Base64-encoded WASM artifact.
+    pub wasm_base64: String,
+    /// Hash algorithm: `sha256` (default) or `sha512`.
+    #[serde(default)]
+    pub algorithm: Option<String>,
+}
+
 /// Request body for a two-artifact operation.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,7 +77,7 @@ pub struct EventsRequest {
     /// Only keep events for this contract id.
     #[serde(default)]
     pub contract: Option<String>,
-    /// Only keep events whose topic matches this text.
+    /// Topic filter: bare substring, `name=<symbol>`, or `indexN=<symbol>`.
     #[serde(default)]
     pub topic: Option<String>,
     /// Only keep events of this type (`system`, `contract`, `diagnostic`).

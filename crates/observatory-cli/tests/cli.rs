@@ -277,14 +277,63 @@ fn spec_type_renders_udt_documentation() {
 }
 
 #[test]
-fn fingerprint_is_sha256() {
+fn fingerprint_defaults_to_sha256() {
     let file = write_temp(&minimal_module(), ".wasm");
-    binary()
+    let assert = binary()
         .args(["fingerprint", file.path().to_str().unwrap(), "--json"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("artifact_sha256"))
-        .stdout(predicate::str::contains("interface_sha256"));
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["data"]["algorithm"], "sha256");
+    assert_eq!(
+        report["data"]["artifact_sha256"].as_str().unwrap().len(),
+        64
+    );
+}
+
+#[test]
+fn fingerprint_selects_sha512() {
+    let file = write_temp(
+        &module_with_spec(&[spec_function("ping", &[], Some(ScSpecTypeDef::Bool))]),
+        ".wasm",
+    );
+    let assert = binary()
+        .args([
+            "fingerprint",
+            file.path().to_str().unwrap(),
+            "--algorithm",
+            "sha512",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["data"]["algorithm"], "sha512");
+    assert_eq!(
+        report["data"]["artifact_sha256"].as_str().unwrap().len(),
+        128
+    );
+    assert_eq!(
+        report["data"]["interface_sha256"].as_str().unwrap().len(),
+        128
+    );
+}
+
+#[test]
+fn fingerprint_rejects_unknown_algorithm() {
+    let file = write_temp(&minimal_module(), ".wasm");
+    binary()
+        .args([
+            "fingerprint",
+            file.path().to_str().unwrap(),
+            "--algorithm",
+            "md5",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unsupported hash algorithm"));
 }
 
 #[test]
@@ -339,6 +388,46 @@ fn events_filters_fixture() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"returned\": 1"));
+}
+
+#[test]
+fn events_accept_structured_topic_filters() {
+    use stellar_xdr::{Limits, ScSymbol, StringM, WriteXdr};
+    fn topic(text: &str) -> String {
+        stellar_xdr::ScVal::Symbol(ScSymbol(StringM::try_from(text).unwrap()))
+            .to_xdr_base64(Limits::none())
+            .unwrap()
+    }
+    let fixture = format!(
+        r#"{{"events":[
+            {{"contractId":"CAAA","type":"contract","topics":["{}","{}"],"data":null}},
+            {{"contractId":"CBBB","type":"contract","topics":["{}","{}"],"data":null}}
+        ]}}"#,
+        topic("transfer"),
+        topic("from"),
+        topic("transfer"),
+        topic("to"),
+    );
+    let file = write_temp(fixture.as_bytes(), ".json");
+    let path = file.path().to_str().unwrap();
+
+    binary()
+        .args(["events", path, "--topic", "name=transfer", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"returned\": 2"));
+
+    binary()
+        .args(["events", path, "--topic", "index1=from", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"returned\": 1"));
+
+    binary()
+        .args(["events", path, "--topic", "index=from", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("topic filter"));
 }
 
 #[test]
@@ -1009,6 +1098,7 @@ fn policy_file_selects_rules_and_echoes_the_resolved_policy() {
           signature_change_is_breaking: false\n\
           type_removal_is_breaking: false\n\
           type_change_is_breaking: false\n\
+          struct_field_addition_is_breaking: false\n\
           event_removal_is_breaking: false\n\
           event_change_is_breaking: false\n",
         ".yml",
@@ -1027,6 +1117,9 @@ fn policy_file_selects_rules_and_echoes_the_resolved_policy() {
         .stdout(predicate::str::contains("\"status\": \"compatible\""))
         .stdout(predicate::str::contains(
             "\"function_removal_is_breaking\": false",
+        ))
+        .stdout(predicate::str::contains(
+            "\"struct_field_addition_is_breaking\": false",
         ));
 
     let invalid = write_temp(b"function_removal_is_breaking: sometimes\n", ".yml");
@@ -1043,6 +1136,48 @@ fn policy_file_selects_rules_and_echoes_the_resolved_policy() {
         .code(2)
         .stdout(predicate::str::contains("function_removal_is_breaking"))
         .stdout(predicate::str::contains("\"code\":\"invalid_input\""));
+}
+
+#[test]
+fn struct_addition_fixture_follows_the_explicit_policy() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/compat");
+    let old = root.join("struct-addition/baseline.wasm");
+    let new = root.join("struct-addition/head.wasm");
+    let old = old.to_str().unwrap();
+    let new = new.to_str().unwrap();
+
+    binary()
+        .args(["compat", old, new, "--json"])
+        .assert()
+        .code(6)
+        .stdout(predicate::str::contains("\"status\": \"incompatible\""))
+        .stdout(predicate::str::contains("type::Payload"));
+
+    let policy = write_temp(
+        b"function_removal_is_breaking: true\n\
+          signature_change_is_breaking: true\n\
+          type_removal_is_breaking: true\n\
+          type_change_is_breaking: true\n\
+          struct_field_addition_is_breaking: false\n\
+          event_removal_is_breaking: true\n\
+          event_change_is_breaking: true\n",
+        ".yml",
+    );
+    binary()
+        .args([
+            "compat",
+            old,
+            new,
+            "--policy-file",
+            policy.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"compatible\""))
+        .stdout(predicate::str::contains(
+            "\"struct_field_addition_is_breaking\": false",
+        ));
 }
 
 #[test]

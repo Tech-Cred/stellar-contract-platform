@@ -26,6 +26,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use observatory_audit::AuditReport;
 use observatory_compat::CompatibilityAssessment;
+use observatory_core::hash::HashAlgorithm;
 use observatory_core::limits::MAX_WASM_BYTES;
 use observatory_diff::InterfaceDiff;
 use observatory_interface::ContractInterface;
@@ -255,10 +256,19 @@ pub struct SpecResponse {
 /// Fingerprint response.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct FingerprintResponse {
-    /// Artifact SHA-256.
+    /// Artifact digest.
+    ///
+    /// The field name is kept for compatibility; `algorithm` says which digest
+    /// produced it. The default is SHA-256.
     pub artifact_sha256: String,
-    /// Canonical interface SHA-256, when a specification is present.
+    /// Canonical interface digest, when a specification is present.
+    ///
+    /// The field name is kept for compatibility; `algorithm` says which digest
+    /// produced it. The default is SHA-256.
     pub interface_sha256: Option<String>,
+    /// Hash algorithm used for both digests.
+    #[serde(default)]
+    pub algorithm: HashAlgorithm,
 }
 
 /// A typed Observatory API client.
@@ -418,9 +428,21 @@ impl Client {
         )
     }
 
-    /// Compute artifact and interface fingerprints.
+    /// Compute artifact and interface fingerprints with the default SHA-256.
     pub fn fingerprint(&self, wasm: &[u8]) -> Result<FingerprintResponse, ClientError> {
-        let body = serde_json::json!({ "wasm_base64": encode_wasm(wasm)? });
+        self.fingerprint_with(wasm, HashAlgorithm::Sha256)
+    }
+
+    /// Compute artifact and interface fingerprints with `algorithm`.
+    pub fn fingerprint_with(
+        &self,
+        wasm: &[u8],
+        algorithm: HashAlgorithm,
+    ) -> Result<FingerprintResponse, ClientError> {
+        let body = serde_json::json!({
+            "wasm_base64": encode_wasm(wasm)?,
+            "algorithm": algorithm.as_str(),
+        });
         self.send(
             "fingerprint",
             "POST",

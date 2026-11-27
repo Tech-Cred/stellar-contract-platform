@@ -20,6 +20,7 @@ with reasons. It is intentionally not a boolean.
 | Removing a type | incompatible | note |
 | Renaming a type (identical shape) | incompatible | note |
 | Changing a type definition | incompatible | note |
+| Appending fields to an existing struct | incompatible | note when explicitly relaxed |
 | Removing an event | incompatible | note |
 | Renaming an event (identical shape) | incompatible | note |
 | Changing an event | incompatible | note |
@@ -33,14 +34,16 @@ note with its path and explanation.
 
 `--policy-file <FILE>` loads the rules from a document instead of a preset. The
 format follows the configuration conventions and is inferred from the extension:
-`.yml`, `.yaml`, `.toml`, or `.json`. Every rule is required, and unknown fields
-are rejected:
+`.yml`, `.yaml`, `.toml`, or `.json`. Unknown fields are rejected. The rules are
+required except `struct_field_addition_is_breaking`, which defaults to `true` so
+existing policy documents keep their strict behavior:
 
 ```yaml
 function_removal_is_breaking: true
 signature_change_is_breaking: true
 type_removal_is_breaking: true
 type_change_is_breaking: true
+struct_field_addition_is_breaking: true
 event_removal_is_breaking: true
 event_change_is_breaking: true
 ```
@@ -52,6 +55,7 @@ function_removal_is_breaking = false
 signature_change_is_breaking = false
 type_removal_is_breaking = false
 type_change_is_breaking = false
+struct_field_addition_is_breaking = false
 event_removal_is_breaking = false
 event_change_is_breaking = false
 ```
@@ -61,10 +65,20 @@ A document that sets every rule to `true` is equivalent to
 `--policy lenient`. The presets keep working. `--policy` and `--policy-file`
 cannot be used together.
 
-An unknown field, a missing field, or a non-boolean value is an invalid-policy
-error (exit code `2`) whose message names the field. The JSON report echoes the
-resolved rules in its `policy` object, so a reviewer can see exactly what was
-applied.
+An unknown field, a missing required field, or a non-boolean value is an
+invalid-policy error (exit code `2`) whose message names the field. The JSON
+report echoes the resolved rules in its `policy` object, so a reviewer can see
+exactly what was applied.
+
+### Struct field additions
+
+Struct field order is semantic for XDR encoding and for consumers that read
+fields positionally, so appending a field remains breaking under the strict
+default. Set `struct_field_addition_is_breaking: false` only when every consumer
+reads struct fields by name. The relaxation is deliberately narrow: it applies
+only when the old fields are an exact ordered prefix by name and type and at
+least one field is appended. Field type changes, removals, renames, union case
+additions, enum changes, and function signature changes are untouched.
 
 ## Why a policy
 

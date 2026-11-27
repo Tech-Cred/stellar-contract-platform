@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use observatory_api::Api;
 use observatory_client::{ApiErrorCode, Client, ClientError, Policy};
+use observatory_core::hash::HashAlgorithm;
 use observatory_platform::{PlatformConfig, RateLimitConfig, Role};
 use observatory_testutil::module_with_spec;
 use observatory_testutil::spec::spec_function;
@@ -87,6 +88,13 @@ fn round_trips_every_endpoint_against_a_local_instance() {
     let fingerprint = client.fingerprint(&wasm).unwrap();
     assert_eq!(fingerprint.artifact_sha256.len(), 64);
     assert!(fingerprint.interface_sha256.is_some());
+    assert_eq!(fingerprint.algorithm, HashAlgorithm::Sha256);
+
+    let sha512 = client
+        .fingerprint_with(&wasm, HashAlgorithm::Sha512)
+        .unwrap();
+    assert_eq!(sha512.algorithm, HashAlgorithm::Sha512);
+    assert_eq!(sha512.artifact_sha256.len(), 128);
 
     let audit = client.security(&wasm).unwrap();
     assert!(audit.findings.iter().all(|finding| !finding.id.is_empty()));

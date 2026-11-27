@@ -26,6 +26,7 @@
       "event_removal_is_breaking": true,
       "function_removal_is_breaking": true,
       "signature_change_is_breaking": true,
+      "struct_field_addition_is_breaking": true,
       "type_change_is_breaking": true,
       "type_removal_is_breaking": true
     },

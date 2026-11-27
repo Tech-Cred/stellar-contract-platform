@@ -265,6 +265,8 @@ export interface CompatibilityPolicy {
   signature_change_is_breaking: boolean;
   type_removal_is_breaking: boolean;
   type_change_is_breaking: boolean;
+  /** Breaking by default because XDR field order is semantic. */
+  struct_field_addition_is_breaking: boolean;
   event_removal_is_breaking: boolean;
   event_change_is_breaking: boolean;
 }

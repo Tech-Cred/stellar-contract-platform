@@ -102,6 +102,19 @@ pub fn document() -> Value {
                     "required": ["wasm_base64"],
                     "properties": { "wasm_base64": { "type": "string" } }
                 },
+                "FingerprintRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["wasm_base64"],
+                    "properties": {
+                        "wasm_base64": { "type": "string" },
+                        "algorithm": {
+                            "type": ["string", "null"],
+                            "enum": ["sha256", "sha512", null],
+                            "default": "sha256"
+                        }
+                    }
+                },
                 "DiffRequest": {
                     "type": "object",
                     "additionalProperties": false,
@@ -134,7 +147,10 @@ pub fn document() -> Value {
                             "oneOf": [{ "type": "array" }, { "type": "object" }, { "type": "string" }]
                         },
                         "contract": { "type": ["string", "null"] },
-                        "topic": { "type": ["string", "null"] },
+                        "topic": {
+                            "type": ["string", "null"],
+                            "description": "Bare substring, name=<symbol>, or indexN=<symbol>. Indices count extracted symbol/string topics only."
+                        },
                         "type": { "type": ["string", "null"] },
                         "limit": {
                             "type": ["integer", "null"],
@@ -320,7 +336,7 @@ fn request_schema_for(path: &str) -> Option<&'static str> {
     match path {
         "/api/v1/contracts/inspect" => Some("InspectRequest"),
         "/api/v1/contracts/spec" => Some("WasmRequest"),
-        "/api/v1/contracts/fingerprint" => Some("WasmRequest"),
+        "/api/v1/contracts/fingerprint" => Some("FingerprintRequest"),
         "/api/v1/contracts/security" => Some("WasmRequest"),
         "/api/v1/contracts/diff" => Some("DiffRequest"),
         "/api/v1/contracts/compatibility" => Some("CompatibilityRequest"),

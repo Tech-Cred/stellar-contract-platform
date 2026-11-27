@@ -16,6 +16,7 @@
 //! | Removing a type | incompatible |
 //! | Renaming a type (identical shape) | incompatible |
 //! | Changing a type definition | incompatible |
+//! | Appending fields to a struct | incompatible by default; configurable |
 //! | Removing an event | incompatible |
 //! | Renaming an event (identical shape) | incompatible |
 //! | Changing an event | incompatible |
@@ -25,6 +26,11 @@
 //! Any of the removal/modification rules can be relaxed through
 //! [`CompatibilityPolicy`]. Relaxing a rule does not make the change disappear;
 //! it is reported as a non-breaking note.
+//!
+//! Struct field order is semantic for XDR encoding and positional consumers, so
+//! appending a field stays breaking under the strict default. Consumers that
+//! read struct fields only by name can opt into
+//! [`CompatibilityPolicy::struct_field_addition_is_breaking`] being `false`.
 //!
 //! If the baseline interface is empty there is nothing to compare against, so
 //! the status is [`CompatibilityStatus::Unknown`] rather than a false verdict.
@@ -45,6 +51,10 @@ pub enum CompatibilityStatus {
     Unknown,
 }
 
+fn default_struct_field_addition_is_breaking() -> bool {
+    true
+}
+
 /// Configuration of the compatibility rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +67,13 @@ pub struct CompatibilityPolicy {
     pub type_removal_is_breaking: bool,
     /// Changing a type definition is breaking.
     pub type_change_is_breaking: bool,
+    /// Appending fields to an existing struct is breaking.
+    ///
+    /// Defaults to `true` because field order is semantic for XDR and for
+    /// positional consumers. Set to `false` only when every consumer reads
+    /// struct fields by name.
+    #[serde(default = "default_struct_field_addition_is_breaking")]
+    pub struct_field_addition_is_breaking: bool,
     /// Removing an event is breaking.
     pub event_removal_is_breaking: bool,
     /// Changing an event definition is breaking.
@@ -78,6 +95,7 @@ impl CompatibilityPolicy {
             signature_change_is_breaking: true,
             type_removal_is_breaking: true,
             type_change_is_breaking: true,
+            struct_field_addition_is_breaking: true,
             event_removal_is_breaking: true,
             event_change_is_breaking: true,
         }
@@ -94,6 +112,7 @@ impl CompatibilityPolicy {
             signature_change_is_breaking: false,
             type_removal_is_breaking: false,
             type_change_is_breaking: false,
+            struct_field_addition_is_breaking: false,
             event_removal_is_breaking: false,
             event_change_is_breaking: false,
         }
@@ -114,6 +133,43 @@ impl CompatibilityPolicy {
             ChangeKind::FunctionAdded | ChangeKind::TypeAdded | ChangeKind::EventAdded => false,
         }
     }
+}
+
+/// Names of fields purely appended to an existing struct, when this type change
+/// is exactly that and nothing else.
+///
+/// Field identity is name plus type: documentation is ignored. The existing
+/// fields must be an exact ordered prefix of the new fields, and the new struct
+/// must have at least one additional field. Unions, enums, removals, renames,
+/// and type changes are deliberately not classified here.
+fn appended_struct_fields<'a>(
+    old: &'a ContractInterface,
+    new: &'a ContractInterface,
+    path: &str,
+) -> Option<Vec<&'a str>> {
+    let name = path.strip_prefix("type::")?;
+    let old_struct = old.structs.iter().find(|item| item.name == name)?;
+    let new_struct = new.structs.iter().find(|item| item.name == name)?;
+    if new_struct.fields.len() <= old_struct.fields.len() {
+        return None;
+    }
+    let is_prefix =
+        old_struct
+            .fields
+            .iter()
+            .zip(&new_struct.fields)
+            .all(|(old_field, new_field)| {
+                old_field.name == new_field.name && old_field.ty == new_field.ty
+            });
+    if !is_prefix {
+        return None;
+    }
+    Some(
+        new_struct.fields[old_struct.fields.len()..]
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect(),
+    )
 }
 
 /// One rule outcome with its explanation.
@@ -178,12 +234,29 @@ pub fn assess(
         if change.severity == Severity::Informational {
             continue;
         }
-        let breaking = policy.is_breaking(change.kind);
+        let appended = if change.kind == ChangeKind::TypeChanged {
+            appended_struct_fields(old, new, &change.path)
+        } else {
+            None
+        };
+        let breaking = if appended.is_some() {
+            policy.struct_field_addition_is_breaking
+        } else {
+            policy.is_breaking(change.kind)
+        };
         incompatible |= breaking;
+        let message = match (&appended, breaking) {
+            (Some(fields), false) => format!(
+                "{}; appended fields {} are non-breaking under the active policy",
+                change.detail,
+                fields.join(", ")
+            ),
+            _ => change.detail.clone(),
+        };
         reasons.push(CompatibilityReason {
             breaking,
             path: change.path.clone(),
-            message: change.detail.clone(),
+            message,
         });
     }
 
@@ -205,7 +278,7 @@ pub fn assess(
 mod tests {
     use super::*;
     use observatory_spec::normalize;
-    use observatory_testutil::spec::{spec_event, spec_function, spec_struct};
+    use observatory_testutil::spec::{spec_event, spec_function, spec_struct, spec_union};
     use stellar_xdr::{ScSpecEntry, ScSpecTypeDef};
 
     fn interface(entries: Vec<ScSpecEntry>) -> ContractInterface {
@@ -253,6 +326,101 @@ mod tests {
         let new = interface(vec![spec_struct("S", &[("a", ScSpecTypeDef::U64)])]);
         assert_eq!(
             assess(&old, &new, CompatibilityPolicy::default()).status,
+            CompatibilityStatus::Incompatible
+        );
+    }
+
+    #[test]
+    fn appended_struct_field_is_breaking_by_default() {
+        let old = interface(vec![
+            spec_function("ping", &[], None),
+            spec_struct("Payload", &[("amount", ScSpecTypeDef::U64)]),
+        ]);
+        let new = interface(vec![
+            spec_function("ping", &[], None),
+            spec_struct(
+                "Payload",
+                &[
+                    ("amount", ScSpecTypeDef::U64),
+                    ("memo", ScSpecTypeDef::Symbol),
+                ],
+            ),
+        ]);
+        let assessment = assess(&old, &new, CompatibilityPolicy::default());
+        assert_eq!(assessment.status, CompatibilityStatus::Incompatible);
+        assert!(assessment
+            .reasons
+            .iter()
+            .any(|r| r.breaking && r.path == "type::Payload"));
+    }
+
+    #[test]
+    fn appended_struct_field_can_be_relaxed() {
+        let old = interface(vec![
+            spec_function("ping", &[], None),
+            spec_struct("Payload", &[("amount", ScSpecTypeDef::U64)]),
+        ]);
+        let new = interface(vec![
+            spec_function("ping", &[], None),
+            spec_struct(
+                "Payload",
+                &[
+                    ("amount", ScSpecTypeDef::U64),
+                    ("memo", ScSpecTypeDef::Symbol),
+                ],
+            ),
+        ]);
+        let mut policy = CompatibilityPolicy::strict();
+        policy.struct_field_addition_is_breaking = false;
+        let assessment = assess(&old, &new, policy);
+        assert_eq!(assessment.status, CompatibilityStatus::Compatible);
+        let reason = assessment
+            .reasons
+            .iter()
+            .find(|r| r.path == "type::Payload")
+            .unwrap();
+        assert!(!reason.breaking);
+        assert!(reason.message.contains("memo"));
+    }
+
+    #[test]
+    fn struct_field_type_change_is_never_relaxed_by_addition_rule() {
+        let old = interface(vec![
+            spec_function("ping", &[], None),
+            spec_struct("Payload", &[("amount", ScSpecTypeDef::U32)]),
+        ]);
+        let new = interface(vec![
+            spec_function("ping", &[], None),
+            spec_struct(
+                "Payload",
+                &[
+                    ("amount", ScSpecTypeDef::U64),
+                    ("memo", ScSpecTypeDef::Symbol),
+                ],
+            ),
+        ]);
+        let mut policy = CompatibilityPolicy::strict();
+        policy.struct_field_addition_is_breaking = false;
+        assert_eq!(
+            assess(&old, &new, policy).status,
+            CompatibilityStatus::Incompatible
+        );
+    }
+
+    #[test]
+    fn union_case_addition_is_never_relaxed_by_addition_rule() {
+        let old = interface(vec![
+            spec_function("ping", &[], None),
+            spec_union("Result", &[("Ok", None)]),
+        ]);
+        let new = interface(vec![
+            spec_function("ping", &[], None),
+            spec_union("Result", &[("Ok", None), ("Pending", None)]),
+        ]);
+        let mut policy = CompatibilityPolicy::strict();
+        policy.struct_field_addition_is_breaking = false;
+        assert_eq!(
+            assess(&old, &new, policy).status,
             CompatibilityStatus::Incompatible
         );
     }

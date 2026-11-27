@@ -11,14 +11,14 @@
 use std::io::Read;
 use std::path::Path;
 
-use observatory_core::hash::sha256_hex;
+use observatory_core::hash::{hash_hex, sha256_hex, HashAlgorithm};
 use observatory_core::limits::{
     MAX_CUSTOM_SECTIONS, MAX_DATA_SEGMENTS, MAX_ELEMENT_SEGMENTS, MAX_EXPORTS, MAX_IMPORTS,
     MAX_TABLES, MAX_WASM_BYTES,
 };
 use observatory_core::{ObservatoryError, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use wasmparser::{ElementItems, ExternalKind, KnownCustom, Parser, Payload, TypeRef};
 
 /// Custom section name carrying the Soroban contract specification.
@@ -473,25 +473,44 @@ pub fn extract_custom_section(bytes: &[u8], name: &str) -> Result<Option<Vec<u8>
     Ok(None)
 }
 
+/// Compute the canonical artifact fingerprint with `algorithm`.
+#[must_use]
+pub fn artifact_fingerprint_with(bytes: &[u8], algorithm: HashAlgorithm) -> String {
+    hash_hex(algorithm, bytes)
+}
+
 /// Compute the canonical artifact fingerprint (SHA-256 of the bytes).
 #[must_use]
 pub fn artifact_fingerprint(bytes: &[u8]) -> String {
-    sha256_hex(bytes)
+    artifact_fingerprint_with(bytes, HashAlgorithm::Sha256)
 }
 
-/// Compute the artifact fingerprint by streaming the file in bounded chunks.
+/// Compute the artifact fingerprint by streaming the file in bounded chunks
+/// with `algorithm`.
 ///
-/// Unlike [`artifact_fingerprint`], this never holds the whole artifact in
+/// Unlike [`artifact_fingerprint_with`], this never holds the whole artifact in
 /// memory: peak memory is one [`HASH_CHUNK_BYTES`] buffer, regardless of file
 /// size. The digest is identical to hashing the full contents at once.
+pub fn artifact_fingerprint_file_with(path: &Path, algorithm: HashAlgorithm) -> Result<String> {
+    match algorithm {
+        HashAlgorithm::Sha256 => artifact_fingerprint_file_hashed::<Sha256>(path),
+        HashAlgorithm::Sha512 => artifact_fingerprint_file_hashed::<Sha512>(path),
+    }
+}
+
+/// Compute the artifact fingerprint with the default SHA-256 algorithm.
 pub fn artifact_fingerprint_file(path: &Path) -> Result<String> {
+    artifact_fingerprint_file_with(path, HashAlgorithm::Sha256)
+}
+
+fn artifact_fingerprint_file_hashed<D: Digest>(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|error| {
         ObservatoryError::Io(std::io::Error::new(
             error.kind(),
             format!("{}: {error}", path.display()),
         ))
     })?;
-    let mut hasher = Sha256::new();
+    let mut hasher = D::new();
     let mut buffer = vec![0u8; HASH_CHUNK_BYTES];
     loop {
         let read = file.read(&mut buffer).map_err(|error| {
@@ -766,6 +785,22 @@ mod tests {
         assert_eq!(
             artifact_fingerprint(&module),
             artifact_fingerprint_file(&path).unwrap()
+        );
+    }
+
+    #[test]
+    fn sha512_is_selectable_and_streaming_matches_in_memory() {
+        let module = module_with_custom_section("blob", &[7u8; HASH_CHUNK_BYTES + 13]);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("artifact.wasm");
+        std::fs::write(&path, &module).unwrap();
+
+        let in_memory = artifact_fingerprint_with(&module, HashAlgorithm::Sha512);
+        assert_eq!(in_memory.len(), 128);
+        assert_ne!(in_memory, artifact_fingerprint(&module));
+        assert_eq!(
+            in_memory,
+            artifact_fingerprint_file_with(&path, HashAlgorithm::Sha512).unwrap()
         );
     }
 

@@ -240,6 +240,7 @@ mod tests {
             (
                 "fingerprint",
                 serde_json::json!({
+                    "algorithm": "sha256",
                     "artifact_sha256": "a".repeat(64),
                     "interface_sha256": null,
                 }),

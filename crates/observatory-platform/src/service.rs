@@ -6,6 +6,7 @@
 
 use observatory_audit::AuditReport;
 use observatory_compat::{assess, CompatibilityAssessment, CompatibilityPolicy};
+use observatory_core::hash::HashAlgorithm;
 use observatory_core::Result;
 use observatory_diff::{diff, InterfaceDiff};
 use observatory_events::{parse_events_str, EventRecord};
@@ -43,10 +44,18 @@ pub struct SpecOutcome {
 /// Outcome of fingerprinting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FingerprintOutcome {
-    /// SHA-256 of the artifact bytes.
+    /// Artifact digest.
+    ///
+    /// The field name is retained for compatibility; `algorithm` identifies the
+    /// digest. The default is SHA-256.
     pub artifact_sha256: String,
-    /// Fingerprint of the canonical interface, when present.
+    /// Canonical interface digest, when present.
+    ///
+    /// The field name is retained for compatibility; `algorithm` identifies the
+    /// digest. The default is SHA-256.
     pub interface_sha256: Option<String>,
+    /// Hash algorithm used for both digests.
+    pub algorithm: HashAlgorithm,
 }
 
 impl Observatory {
@@ -106,18 +115,28 @@ impl Observatory {
         Ok(assess(&old, &new, policy))
     }
 
-    /// Compute artifact and interface fingerprints.
+    /// Compute artifact and interface fingerprints with `algorithm`.
     #[tracing::instrument(name = "service.fingerprint", skip(wasm))]
-    pub fn fingerprint(&self, wasm: &[u8]) -> Result<FingerprintOutcome> {
-        let artifact_sha256 = observatory_wasm::artifact_fingerprint(wasm);
+    pub fn fingerprint_with(
+        &self,
+        wasm: &[u8],
+        algorithm: HashAlgorithm,
+    ) -> Result<FingerprintOutcome> {
+        let artifact_sha256 = observatory_wasm::artifact_fingerprint_with(wasm, algorithm);
         let interface_sha256 = match ContractInterface::from_wasm(wasm) {
-            Ok(interface) => Some(interface.fingerprint()?),
+            Ok(interface) => Some(interface.fingerprint_with(algorithm)?),
             Err(_) => None,
         };
         Ok(FingerprintOutcome {
             artifact_sha256,
             interface_sha256,
+            algorithm,
         })
+    }
+
+    /// Compute artifact and interface fingerprints with the default SHA-256.
+    pub fn fingerprint(&self, wasm: &[u8]) -> Result<FingerprintOutcome> {
+        self.fingerprint_with(wasm, HashAlgorithm::Sha256)
     }
 
     /// Run security heuristics over an artifact and its interface.
@@ -150,11 +169,15 @@ impl Observatory {
         limit: Option<usize>,
     ) -> Result<Vec<EventRecord>> {
         let events = observatory_events::parse_events(value)?;
+        let topic_filter = topic
+            .map(observatory_events::TopicFilter::parse)
+            .transpose()?;
         Ok(observatory_events::filter(
             &events,
             &observatory_events::EventFilter {
                 contract: contract.map(str::to_string),
-                topic: topic.map(str::to_string),
+                topic: None,
+                topic_filter,
                 event_type: event_type.map(str::to_string),
                 limit,
             },
@@ -214,6 +237,27 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.artifact_sha256.len(), 64);
         assert!(a.interface_sha256.is_some());
+        assert_eq!(a.algorithm, HashAlgorithm::Sha256);
+    }
+
+    #[test]
+    fn fingerprint_reports_selected_algorithm() {
+        let outcome = Observatory
+            .fingerprint_with(&contract(), HashAlgorithm::Sha512)
+            .unwrap();
+        assert_eq!(outcome.algorithm, HashAlgorithm::Sha512);
+        assert_eq!(outcome.artifact_sha256.len(), 128);
+        assert!(outcome
+            .interface_sha256
+            .as_deref()
+            .is_some_and(|digest| digest.len() == 128));
+        assert_ne!(
+            outcome.artifact_sha256,
+            Observatory
+                .fingerprint(&contract())
+                .unwrap()
+                .artifact_sha256
+        );
     }
 
     #[test]

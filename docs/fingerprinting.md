@@ -6,13 +6,17 @@ Fingerprints provide stable identity for artifacts and interfaces.
 
 | Fingerprint | Covers | Does not cover |
 | ----------- | ------ | -------------- |
-| Artifact SHA-256 | The exact WASM bytes | Interface meaning, source |
-| Interface SHA-256 | The canonical interface (functions, types, events) | Implementation, metadata |
+| Artifact digest | The exact WASM bytes | Interface meaning, source |
+| Interface digest | The canonical interface (functions, types, events) | Implementation, metadata |
+
+Both digests use SHA-256 by default. `--algorithm sha512` selects SHA-512. The
+report always includes an `algorithm` field so a digest can never be mistaken
+for another algorithm.
 
 ## Artifact fingerprint
 
-`fingerprint <wasm>` prints the SHA-256 of the artifact bytes. This is the same
-value used by `verify artifact`.
+`fingerprint <wasm>` prints the SHA-256 of the artifact bytes by default. This
+is the same value used by `verify artifact`.
 
 The CLI streams the file through a bounded buffer
 (`observatory_wasm::artifact_fingerprint_file`) instead of loading it whole, so
@@ -31,7 +35,9 @@ and preserves sequence-keyed collections, so:
 - reordering function parameters **does** change the fingerprint,
 - changing a type does change the fingerprint.
 
-Known-value test vectors pin the digest of representative interfaces to detect
+Changing the algorithm changes the digest but not the canonical bytes, so
+existing SHA-256 fingerprints remain valid. Known-value test vectors pin the
+digest of representative interfaces for every supported algorithm to detect
 accidental format changes. The vectors in
 `crates/observatory-interface/src/lib.rs` cover primitives, composite types,
 user-defined types, events, and a large interface.

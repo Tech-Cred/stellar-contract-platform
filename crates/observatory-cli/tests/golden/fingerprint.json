@@ -1,5 +1,6 @@
 {
   "data": {
+    "algorithm": "sha256",
     "artifact_sha256": "8cc5cafd0bbd7f2204e3e92ac496d151a61897c227d365e30df08af5ae3a31d7",
     "interface_sha256": "abd0bdb0b4695877aecb6283a173b808f3c161aca4a27401a94968aa8374c2a0"
   },

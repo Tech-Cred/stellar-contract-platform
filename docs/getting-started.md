@@ -54,7 +54,9 @@ stellar-contract-platform fingerprint contract.wasm --json
 ```
 
 The artifact fingerprint and the canonical interface fingerprint are different:
-equal interfaces do not imply equal implementations.
+equal interfaces do not imply equal implementations. SHA-256 is the default;
+pass `--algorithm sha512` to select SHA-512. The report always names the
+algorithm it used.
 
 ## Where to go next
 

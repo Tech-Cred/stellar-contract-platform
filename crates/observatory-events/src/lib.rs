@@ -91,6 +91,86 @@ struct RawScValXdr {
     data: String,
 }
 
+/// A parsed topic filter.
+///
+/// Bare text keeps the legacy substring behavior. `name=<value>` matches one
+/// extracted topic symbol exactly, and `indexN=<value>` matches the symbol at
+/// zero-based position `N` exactly. Structured forms never fall back to the
+/// rendered topic JSON, so indices stay deterministic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopicFilter {
+    /// Legacy substring match against symbols or rendered topics.
+    Contains(String),
+    /// Exact match against any extracted symbol.
+    Name(String),
+    /// Exact match against the extracted symbol at a zero-based index.
+    Index(usize, String),
+}
+
+impl TopicFilter {
+    /// Parse a `--topic` value, rejecting malformed structured filters.
+    pub fn parse(raw: &str) -> Result<Self> {
+        if raw.is_empty() {
+            return Err(ObservatoryError::invalid("topic filter must not be empty"));
+        }
+        if let Some(value) = raw.strip_prefix("name=") {
+            if value.is_empty() {
+                return Err(ObservatoryError::invalid(
+                    "topic filter name= requires a non-empty value",
+                ));
+            }
+            return Ok(Self::Name(value.to_string()));
+        }
+        if let Some(rest) = raw.strip_prefix("index") {
+            let Some((digits, value)) = rest.split_once('=') else {
+                return Err(ObservatoryError::invalid(
+                    "topic filter indexN= requires an index and a value",
+                ));
+            };
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ObservatoryError::invalid(
+                    "topic filter index must be a non-negative decimal integer",
+                ));
+            }
+            let index = digits
+                .parse::<usize>()
+                .map_err(|_| ObservatoryError::invalid("topic filter index is out of range"))?;
+            if value.is_empty() {
+                return Err(ObservatoryError::invalid(
+                    "topic filter indexN= requires a non-empty value",
+                ));
+            }
+            return Ok(Self::Index(index, value.to_string()));
+        }
+        if raw.contains('=') {
+            return Err(ObservatoryError::invalid(format!(
+                "unsupported topic filter '{raw}'; use name=<value> or indexN=<value>"
+            )));
+        }
+        Ok(Self::Contains(raw.to_string()))
+    }
+
+    fn matches(&self, event: &EventRecord) -> bool {
+        match self {
+            Self::Contains(text) => {
+                event
+                    .topic_symbols
+                    .iter()
+                    .any(|symbol| symbol.contains(text.as_str()))
+                    || event
+                        .topics
+                        .iter()
+                        .any(|rendered| rendered.contains(text.as_str()))
+            }
+            Self::Name(expected) => event.topic_symbols.iter().any(|symbol| symbol == expected),
+            Self::Index(index, expected) => event
+                .topic_symbols
+                .get(*index)
+                .is_some_and(|symbol| symbol == expected),
+        }
+    }
+}
+
 /// A filter over a set of events.
 ///
 /// Filters are applied in a fixed order: contract, then type, then topic, then
@@ -107,6 +187,8 @@ pub struct EventFilter {
     pub contract: Option<String>,
     /// Only keep events whose topic text or rendered topic contains this value.
     pub topic: Option<String>,
+    /// Structured topic filter, taking precedence over `topic` when present.
+    pub topic_filter: Option<TopicFilter>,
     /// Only keep events of this type.
     pub event_type: Option<String>,
     /// Keep at most this many events (applied last).
@@ -246,6 +328,12 @@ fn decode_rpc_scval(value: &Value) -> Result<(ScVal, String)> {
 /// Apply a filter to a set of events.
 #[must_use]
 pub fn filter(events: &[EventRecord], filter: &EventFilter) -> Vec<EventRecord> {
+    let topic_filter = filter.topic_filter.clone().or_else(|| {
+        filter
+            .topic
+            .as_ref()
+            .map(|topic| TopicFilter::Contains(topic.clone()))
+    });
     let mut out: Vec<EventRecord> = events
         .iter()
         .filter(|event| {
@@ -261,16 +349,9 @@ pub fn filter(events: &[EventRecord], filter: &EventFilter) -> Vec<EventRecord> 
                 .is_none_or(|kind| event.event_type.eq_ignore_ascii_case(kind))
         })
         .filter(|event| {
-            filter.topic.as_ref().is_none_or(|topic| {
-                event
-                    .topic_symbols
-                    .iter()
-                    .any(|symbol| symbol.contains(topic.as_str()))
-                    || event
-                        .topics
-                        .iter()
-                        .any(|rendered| rendered.contains(topic.as_str()))
-            })
+            topic_filter
+                .as_ref()
+                .is_none_or(|topic| topic.matches(event))
         })
         .cloned()
         .collect();
@@ -718,6 +799,131 @@ mod tests {
             },
         );
         assert_eq!(by_type.len(), 1);
+    }
+
+    #[test]
+    fn parses_structured_topic_filters() {
+        assert_eq!(
+            TopicFilter::parse("transfer").unwrap(),
+            TopicFilter::Contains("transfer".to_string())
+        );
+        assert_eq!(
+            TopicFilter::parse("name=transfer").unwrap(),
+            TopicFilter::Name("transfer".to_string())
+        );
+        assert_eq!(
+            TopicFilter::parse("index0=transfer").unwrap(),
+            TopicFilter::Index(0, "transfer".to_string())
+        );
+        assert_eq!(
+            TopicFilter::parse("index12=from").unwrap(),
+            TopicFilter::Index(12, "from".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_topic_filters() {
+        for raw in [
+            "",
+            "name=",
+            "index=",
+            "index=transfer",
+            "index-1=transfer",
+            "indexA=transfer",
+            "index999999999999999999999999999999999999=transfer",
+            "index0=",
+            "idx0=transfer",
+            "namex=transfer",
+        ] {
+            assert!(
+                TopicFilter::parse(raw).is_err(),
+                "accepted malformed filter {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_topic_filters_match_exact_symbols() {
+        let value = json!([
+            {
+                "type": "contract",
+                "topics": [symbol_base64("transfer"), symbol_base64("from")],
+                "data": null
+            },
+            {
+                "type": "contract",
+                "topics": [symbol_base64("transfer"), symbol_base64("to")],
+                "data": null
+            }
+        ]);
+        let events = parse_events(&value).unwrap();
+
+        let by_name = filter(
+            &events,
+            &EventFilter {
+                topic_filter: Some(TopicFilter::parse("name=transfer").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_name.len(), 2);
+
+        let by_index = filter(
+            &events,
+            &EventFilter {
+                topic_filter: Some(TopicFilter::parse("index1=from").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_index.len(), 1);
+        assert_eq!(by_index[0].topic_symbols, vec!["transfer", "from"]);
+
+        let substring_does_not_match = filter(
+            &events,
+            &EventFilter {
+                topic_filter: Some(TopicFilter::parse("name=trans").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert!(substring_does_not_match.is_empty());
+
+        let wrong_index = filter(
+            &events,
+            &EventFilter {
+                topic_filter: Some(TopicFilter::parse("index1=transfer").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert!(wrong_index.is_empty());
+    }
+
+    #[test]
+    fn topic_index_counts_extracted_symbols_only() {
+        let number = ScVal::U32(7).to_xdr_base64(Limits::none()).unwrap();
+        let value = json!([{
+            "type": "contract",
+            "topics": [number, symbol_base64("transfer")],
+            "data": null
+        }]);
+        let events = parse_events(&value).unwrap();
+        assert_eq!(events[0].topic_symbols, vec!["transfer"]);
+
+        let zero = filter(
+            &events,
+            &EventFilter {
+                topic_filter: Some(TopicFilter::parse("index0=transfer").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(zero.len(), 1);
+
+        let one = filter(
+            &events,
+            &EventFilter {
+                topic_filter: Some(TopicFilter::parse("index1=transfer").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert!(one.is_empty());
     }
 
     #[test]
