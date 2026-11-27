@@ -1485,6 +1485,7 @@ dependencies = [
  "observatory-core",
  "observatory-testutil",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "wasmparser",

@@ -37,6 +37,7 @@
                 "type_added": { "type": "integer", "minimum": 1 },
                 "type_removed": { "type": "integer", "minimum": 1 },
                 "type_changed": { "type": "integer", "minimum": 1 },
+                "union_case_added": { "type": "integer", "minimum": 1 },
                 "type_renamed": { "type": "integer", "minimum": 1 },
                 "event_added": { "type": "integer", "minimum": 1 },
                 "event_removed": { "type": "integer", "minimum": 1 },

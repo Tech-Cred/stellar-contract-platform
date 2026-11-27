@@ -5,7 +5,6 @@ Cargo.lock.orig
 
 # IDE
 .idea/
-.vscode/
 *.swp
 *~
 
@@ -14,8 +13,6 @@ Cargo.lock.orig
 Thumbs.db
 
 # Secrets / environment
-.env
-.env.*
 !.env.example
 *.pem
 *.key
@@ -35,3 +32,5 @@ fuzz/coverage/
 __pycache__/
 *.py[cod]
 .venv/
+config.bat
+node_modules

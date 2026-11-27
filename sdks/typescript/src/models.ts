@@ -60,6 +60,15 @@ export interface CustomSectionInfo {
   size: number;
 }
 
+export interface NameInfo {
+  /** Module name, when present. */
+  module?: string;
+  /** Function names keyed by function index. */
+  functions?: Record<string, string>;
+  /** Type names keyed by type index. */
+  types?: Record<string, string>;
+}
+
 export interface WasmReport {
   size_bytes: number;
   version: number;
@@ -72,6 +81,8 @@ export interface WasmReport {
   imports: ImportInfo[];
   exports: ExportInfo[];
   custom_sections: CustomSectionInfo[];
+  /** Present only when the `name` custom section yields at least one name. */
+  name?: NameInfo;
   code_section_bytes: number;
   has_contract_spec: boolean;
   contract_spec_bytes: number | null;
@@ -204,12 +215,19 @@ export interface ContractInterface {
 
 export type AuditStatus = "PASS" | "WARN" | "ERROR";
 
+export type FindingConfidence = "HIGH" | "MEDIUM" | "LOW";
+
 export interface Finding {
   id: string;
   severity: "WARN" | "ERROR";
   message: string;
   path: string | null;
   experimental: boolean;
+  confidence: FindingConfidence;
+  /** Bounded observations backing the potential issue (one or two entries). */
+  evidence: string[];
+  /** Non-prescriptive next step for reviewing the potential issue. */
+  recommendation: string;
 }
 
 export interface AuditReport {

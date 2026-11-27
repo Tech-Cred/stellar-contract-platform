@@ -8,6 +8,7 @@
 //! CI. Ordering of imports, exports, and custom sections follows module order,
 //! which is meaningful for WASM.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
@@ -19,7 +20,9 @@ use observatory_core::limits::{
 use observatory_core::{ObservatoryError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use wasmparser::{ElementItems, ExternalKind, KnownCustom, Parser, Payload, TypeRef};
+use wasmparser::{
+    ElementItems, ExternalKind, KnownCustom, Name, NameMap, Parser, Payload, TypeRef,
+};
 
 /// Custom section name carrying the Soroban contract specification.
 pub const CONTRACT_SPEC_SECTION: &str = "contractspecv0";
@@ -44,6 +47,15 @@ pub const HASH_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Maximum number of `producers` entries retained across all categories.
 pub const MAX_PRODUCER_ENTRIES: usize = 64;
+
+/// Maximum number of function or type names retained from the `name` section.
+pub const MAX_NAME_ENTRIES: usize = 64;
+
+/// Maximum length of a single name retained from the `name` section, in bytes.
+///
+/// The name section does not limit string lengths, so names longer than this
+/// are skipped rather than copied into a report.
+pub const MAX_NAME_BYTES: usize = 256;
 
 /// Preamble that identifies a WebAssembly component-model binary.
 ///
@@ -112,6 +124,31 @@ pub struct ProducersInfo {
     pub processed_by: Vec<ProducerEntry>,
     /// `sdk` entries.
     pub sdk: Vec<ProducerEntry>,
+}
+
+/// Bounded names decoded from the optional WASM `name` custom section.
+///
+/// Each map is keyed by the index being named. Empty maps are omitted from
+/// JSON, and the whole object is omitted when no names were retained.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameInfo {
+    /// Module name, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    /// Function names by function index, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub functions: Option<BTreeMap<u32, String>>,
+    /// Type names by type index, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub types: Option<BTreeMap<u32, String>>,
+}
+
+impl NameInfo {
+    fn is_empty(&self) -> bool {
+        self.module.is_none()
+            && self.functions.as_ref().is_none_or(BTreeMap::is_empty)
+            && self.types.as_ref().is_none_or(BTreeMap::is_empty)
+    }
 }
 
 /// The start section, when declared.
@@ -185,13 +222,16 @@ pub struct WasmReport {
     pub custom_sections: Vec<CustomSectionInfo>,
     /// Build provenance from the `producers` section, when present and valid.
     pub producers: Option<ProducersInfo>,
+    /// Function, module, and type names from the `name` section, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<NameInfo>,
     /// Total byte size of the code section.
     pub code_section_bytes: usize,
     /// Whether a `contractspecv0` section is present.
     pub has_contract_spec: bool,
     /// Size of the `contractspecv0` section payload, if present.
     pub contract_spec_bytes: Option<usize>,
-    /// Whether import/export/custom-section lists were truncated by limits.
+    /// Whether a bounded report list was clipped or malformed entries skipped.
     pub truncated: bool,
 }
 
@@ -277,6 +317,7 @@ pub fn inspect(bytes: &[u8]) -> Result<WasmReport> {
         exports: Vec::new(),
         custom_sections: Vec::new(),
         producers: None,
+        name: None,
         code_section_bytes: 0,
         has_contract_spec: false,
         contract_spec_bytes: None,
@@ -399,6 +440,15 @@ pub fn inspect(bytes: &[u8]) -> Result<WasmReport> {
                         let (producers, truncated) = collect_producers(reader);
                         report.producers = Some(producers);
                         report.truncated |= truncated;
+                    }
+                }
+                if name == "name" && report.name.is_none() {
+                    if let KnownCustom::Name(reader) = section.as_known() {
+                        let (names, truncated) = collect_names(reader);
+                        report.truncated |= truncated;
+                        if !names.is_empty() {
+                            report.name = Some(names);
+                        }
                     }
                 }
                 report
@@ -545,6 +595,65 @@ fn collect_producers(reader: wasmparser::ProducersSectionReader<'_>) -> (Produce
     (info, truncated)
 }
 
+/// Decode bounded module, function, and type names.
+///
+/// Unsupported and malformed subsections are skipped rather than reported as
+/// inspection errors. A malformed map may leave the section reader in an
+/// unknown state, so that map stops at the first bad entry.
+fn collect_names(reader: wasmparser::NameSectionReader<'_>) -> (NameInfo, bool) {
+    let mut info = NameInfo::default();
+    let mut truncated = false;
+    for subsection in reader {
+        let Ok(subsection) = subsection else {
+            truncated = true;
+            break;
+        };
+        match subsection {
+            Name::Module { name, .. } => {
+                if name.len() > MAX_NAME_BYTES {
+                    truncated = true;
+                } else {
+                    info.module = Some(name.to_string());
+                }
+            }
+            Name::Function(map) => {
+                let mut functions = BTreeMap::new();
+                collect_name_map(map, &mut functions, &mut truncated);
+                if !functions.is_empty() {
+                    info.functions = Some(functions);
+                }
+            }
+            Name::Type(map) => {
+                let mut types = BTreeMap::new();
+                collect_name_map(map, &mut types, &mut truncated);
+                if !types.is_empty() {
+                    info.types = Some(types);
+                }
+            }
+            _ => {}
+        }
+    }
+    (info, truncated)
+}
+
+fn collect_name_map(map: NameMap<'_>, out: &mut BTreeMap<u32, String>, truncated: &mut bool) {
+    for naming in map {
+        let Ok(naming) = naming else {
+            *truncated = true;
+            break;
+        };
+        if out.len() >= MAX_NAME_ENTRIES {
+            *truncated = true;
+            break;
+        }
+        if naming.name.len() > MAX_NAME_BYTES {
+            *truncated = true;
+            continue;
+        }
+        out.insert(naming.index, naming.name.to_string());
+    }
+}
+
 fn type_ref_kind(ty: &TypeRef) -> &'static str {
     match ty {
         TypeRef::Func(_) => "func",
@@ -571,7 +680,8 @@ fn external_kind(kind: &ExternalKind) -> &'static str {
 mod tests {
     use super::*;
     use observatory_testutil::{
-        minimal_module, module_with_custom_section, module_with_producers, CONTRACT_SPEC_SECTION,
+        minimal_module, module_with_custom_section, module_with_names, module_with_producers,
+        CONTRACT_SPEC_SECTION,
     };
 
     #[test]
@@ -582,6 +692,7 @@ mod tests {
         assert!(report.imports.is_empty());
         assert!(report.exports.is_empty());
         assert!(!report.has_contract_spec);
+        assert_eq!(report.name, None);
         assert_eq!(report.artifact_sha256, sha256_hex(&minimal_module()));
     }
 
@@ -678,6 +789,91 @@ mod tests {
         assert_eq!(report.memories[0].maximum_pages, Some(2));
         assert!(!report.memories[0].memory64);
         assert!(report.code_section_bytes > 0);
+    }
+
+    #[test]
+    fn reports_names_from_a_wat_fixture() {
+        let wasm = wat::parse_str(
+            r#"(module $demo
+                (type $counter (func))
+                (func $increment (type $counter))
+            )"#,
+        )
+        .unwrap();
+        let report = inspect(&wasm).unwrap();
+        let names = report.name.expect("wat fixture has a name section");
+        assert_eq!(names.module.as_deref(), Some("demo"));
+        assert!(names
+            .functions
+            .as_ref()
+            .is_some_and(|map| map.values().any(|name| name == "increment")));
+        assert!(names
+            .types
+            .as_ref()
+            .is_some_and(|map| map.values().any(|name| name == "counter")));
+    }
+
+    #[test]
+    fn reports_module_function_and_type_names() {
+        let module = module_with_names(Some("demo"), &[(3, "run"), (0, "init")], &[(1, "Config")]);
+        let report = inspect(&module).unwrap();
+        let names = report.name.as_ref().expect("name section");
+        assert_eq!(names.module.as_deref(), Some("demo"));
+        let functions = names.functions.as_ref().expect("function names");
+        assert_eq!(functions.get(&0).map(String::as_str), Some("init"));
+        assert_eq!(functions.get(&3).map(String::as_str), Some("run"));
+        let types = names.types.as_ref().expect("type names");
+        assert_eq!(types.get(&1).map(String::as_str), Some("Config"));
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["name"]["module"], "demo");
+        assert_eq!(json["name"]["functions"]["0"], "init");
+        assert_eq!(json["name"]["types"]["1"], "Config");
+    }
+
+    #[test]
+    fn names_are_omitted_when_the_section_is_absent() {
+        let report = inspect(&minimal_module()).unwrap();
+        assert!(report.name.is_none());
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("name").is_none(), "{json}");
+    }
+
+    #[test]
+    fn malformed_name_section_does_not_fail_inspection() {
+        // Module-name subsection declares five bytes but supplies one.
+        let module = module_with_custom_section("name", &[0, 5, b'a']);
+        let report = inspect(&module).unwrap();
+        assert_eq!(report.name, None);
+        assert!(report.truncated);
+    }
+
+    #[test]
+    fn names_are_bounded() {
+        let names: Vec<(u32, String)> = (0..MAX_NAME_ENTRIES + 3)
+            .map(|index: usize| (index as u32, format!("function-{index}")))
+            .collect();
+        let entries: Vec<(u32, &str)> = names
+            .iter()
+            .map(|(index, name)| (*index, name.as_str()))
+            .collect();
+        let module = module_with_names(None, &entries, &[]);
+        let report = inspect(&module).unwrap();
+        let truncated = report.truncated;
+        let names = report.name.expect("function names");
+        let functions = names.functions.expect("function map");
+        assert_eq!(functions.len(), MAX_NAME_ENTRIES);
+        assert!(truncated);
+        assert!(names.module.is_none());
+    }
+
+    #[test]
+    fn oversized_names_are_skipped() {
+        let long = "x".repeat(MAX_NAME_BYTES + 1);
+        let module = module_with_names(None, &[(0, &long)], &[]);
+        let report = inspect(&module).unwrap();
+        assert!(report.truncated);
+        assert_eq!(report.name, None);
     }
 
     #[test]

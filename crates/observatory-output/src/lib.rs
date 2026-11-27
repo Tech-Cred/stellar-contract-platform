@@ -246,7 +246,19 @@ mod tests {
             ),
             (
                 "security",
-                serde_json::json!({ "status": "PASS", "findings": [] }),
+                serde_json::json!({
+                    "status": "WARN",
+                    "findings": [{
+                        "id": "artifact.no-code",
+                        "severity": "WARN",
+                        "message": "Potential issue: module contains no code section",
+                        "path": null,
+                        "experimental": false,
+                        "confidence": "HIGH",
+                        "evidence": ["module contains no code section"],
+                        "recommendation": "Include a code section or verify this is the intended artifact."
+                    }]
+                }),
             ),
             (
                 "deployment",

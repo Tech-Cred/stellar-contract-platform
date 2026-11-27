@@ -7,7 +7,8 @@ each change a default severity. It never claims compatibility; that is
 ## Change kinds
 
 Functions: `function_added`, `function_removed`, `function_changed`, `function_renamed`.
-Types: `type_added`, `type_removed`, `type_changed`, `type_renamed`.
+Types: `type_added`, `type_removed`, `type_changed`, `type_renamed`,
+`union_case_added`.
 Events: `event_added`, `event_removed`, `event_changed`, `event_renamed`.
 
 ## Default severity rules
@@ -22,6 +23,7 @@ Events: `event_added`, `event_removed`, `event_changed`, `event_renamed`.
 | Type removed | breaking |
 | Type renamed (identical shape) | breaking |
 | Type definition changed | breaking |
+| Union case added | breaking |
 | Type documentation only | informational |
 | Event added | non-breaking |
 | Event removed | breaking |
@@ -102,6 +104,14 @@ match. Different shapes, or ambiguous pairings (for example, two removed structs
 with one added struct of the same shape), are reported as separate removals and
 additions. A type rename is breaking by default because consumers refer to types
 by name.
+
+## Union case additions
+
+Adding cases to an existing union without changing its previous cases is
+reported as `union_case_added`, separate from a generic `type_changed`. The raw
+diff marks it breaking: decoders with exhaustive case handling may reject the
+new values. `compat` can relax this one rule without changing how other type
+edits are classified.
 
 ## Event renames
 

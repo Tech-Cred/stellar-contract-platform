@@ -83,6 +83,23 @@
             "imports": { "type": "array", "items": { "type": "object" } },
             "exports": { "type": "array", "items": { "type": "object" } },
             "custom_sections": { "type": "array", "items": { "type": "object" } },
+            "name": {
+              "type": "object",
+              "description": "Bounded module, function, and type names from the optional `name` custom section; omitted when no names are present.",
+              "properties": {
+                "module": { "type": "string" },
+                "functions": {
+                  "type": "object",
+                  "description": "Function names keyed by function index.",
+                  "additionalProperties": { "type": "string" }
+                },
+                "types": {
+                  "type": "object",
+                  "description": "Type names keyed by type index.",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            },
             "producers": {
               "type": ["object", "null"],
               "description": "Decoded from the producers custom section, when present and valid.",

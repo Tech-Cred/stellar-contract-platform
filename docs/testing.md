@@ -61,6 +61,8 @@ $env:UPDATE_GOLDEN=1; cargo test -p observatory-cli --test golden
 | ------- | -------- |
 | Minimal WASM module | `observatory_testutil::minimal_module` |
 | Module with a custom section | `observatory_testutil::module_with_custom_section` |
+| Module with a `name` section | `observatory_testutil::module_with_names` |
+| Module with a `producers` section | `observatory_testutil::module_with_producers` |
 | Module with a contract spec | `observatory_testutil::spec::*` + `module_with_spec` |
 | Event fixtures | `observatory-events` test helpers (base64 `ScVal`) |
 | Ledger entries | `stellar-xdr` `LedgerEntryData` encoded in tests |
