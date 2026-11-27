@@ -16,6 +16,7 @@
 //! | Removing a type | incompatible |
 //! | Renaming a type (identical shape) | incompatible |
 //! | Changing a type definition | incompatible |
+//! | Adding an enum case | incompatible by default, configurable |
 //! | Removing an event | incompatible |
 //! | Renaming an event (identical shape) | incompatible |
 //! | Changing an event | incompatible |
@@ -25,6 +26,13 @@
 //! Any of the removal/modification rules can be relaxed through
 //! [`CompatibilityPolicy`]. Relaxing a rule does not make the change disappear;
 //! it is reported as a non-breaking note.
+//!
+//! Enum additions have their own rule. Adding a variant is breaking by default
+//! because consumers with exhaustive matches, fixed discriminants, or stored
+//! representations may reject or misread the new case. Teams that treat enums as
+//! open can set [`CompatibilityPolicy::enum_case_addition_is_breaking`] to
+//! `false`; that flag affects enum additions only, never struct or union changes,
+//! removals, value changes, or function/event rules.
 //!
 //! If the baseline interface is empty there is nothing to compare against, so
 //! the status is [`CompatibilityStatus::Unknown`] rather than a false verdict.
@@ -57,6 +65,13 @@ pub struct CompatibilityPolicy {
     pub type_removal_is_breaking: bool,
     /// Changing a type definition is breaking.
     pub type_change_is_breaking: bool,
+    /// Adding a case to an existing enum or error enum is breaking.
+    ///
+    /// The default is `true`: an added variant can break exhaustive matches and
+    /// fixed discriminants in consumers. Set it to `false` only when consumers
+    /// treat enums as open. This rule is independent of
+    /// [`Self::type_change_is_breaking`] and applies only to case additions.
+    pub enum_case_addition_is_breaking: bool,
     /// Removing an event is breaking.
     pub event_removal_is_breaking: bool,
     /// Changing an event definition is breaking.
@@ -78,6 +93,7 @@ impl CompatibilityPolicy {
             signature_change_is_breaking: true,
             type_removal_is_breaking: true,
             type_change_is_breaking: true,
+            enum_case_addition_is_breaking: true,
             event_removal_is_breaking: true,
             event_change_is_breaking: true,
         }
@@ -94,6 +110,7 @@ impl CompatibilityPolicy {
             signature_change_is_breaking: false,
             type_removal_is_breaking: false,
             type_change_is_breaking: false,
+            enum_case_addition_is_breaking: false,
             event_removal_is_breaking: false,
             event_change_is_breaking: false,
         }
@@ -109,6 +126,7 @@ impl CompatibilityPolicy {
             }
             ChangeKind::TypeRemoved | ChangeKind::TypeRenamed => self.type_removal_is_breaking,
             ChangeKind::TypeChanged => self.type_change_is_breaking,
+            ChangeKind::EnumCaseAdded => self.enum_case_addition_is_breaking,
             ChangeKind::EventRemoved | ChangeKind::EventRenamed => self.event_removal_is_breaking,
             ChangeKind::EventChanged => self.event_change_is_breaking,
             ChangeKind::FunctionAdded | ChangeKind::TypeAdded | ChangeKind::EventAdded => false,
@@ -205,7 +223,9 @@ pub fn assess(
 mod tests {
     use super::*;
     use observatory_spec::normalize;
-    use observatory_testutil::spec::{spec_event, spec_function, spec_struct};
+    use observatory_testutil::spec::{
+        spec_enum, spec_error_enum, spec_event, spec_function, spec_struct, spec_union,
+    };
     use stellar_xdr::{ScSpecEntry, ScSpecTypeDef};
 
     fn interface(entries: Vec<ScSpecEntry>) -> ContractInterface {
@@ -254,6 +274,103 @@ mod tests {
         assert_eq!(
             assess(&old, &new, CompatibilityPolicy::default()).status,
             CompatibilityStatus::Incompatible
+        );
+    }
+
+    #[test]
+    fn enum_case_addition_is_breaking_by_default() {
+        let old = interface(vec![spec_enum("Status", &[("Active", 0)])]);
+        let new = interface(vec![spec_enum("Status", &[("Active", 0), ("Paused", 1)])]);
+        let assessment = assess(&old, &new, CompatibilityPolicy::default());
+        assert_eq!(assessment.status, CompatibilityStatus::Incompatible);
+        assert!(assessment.reasons.iter().any(|reason| {
+            reason.breaking && reason.path == "type::Status" && reason.message.contains("Paused")
+        }));
+    }
+
+    #[test]
+    fn enum_addition_flag_changes_only_enum_additions() {
+        let mut policy = CompatibilityPolicy::strict();
+        policy.enum_case_addition_is_breaking = false;
+
+        // An enum case addition becomes a note.
+        let enum_old = interface(vec![spec_enum("Status", &[("Active", 0)])]);
+        let enum_new = interface(vec![spec_enum("Status", &[("Active", 0), ("Paused", 1)])]);
+        let enum_assessment = assess(&enum_old, &enum_new, policy);
+        assert_eq!(enum_assessment.status, CompatibilityStatus::Compatible);
+        assert!(enum_assessment
+            .reasons
+            .iter()
+            .all(|reason| !reason.breaking));
+
+        // Removing a case and changing a value are still generic type changes.
+        let removal = assess(
+            &interface(vec![spec_enum("Status", &[("Active", 0), ("Paused", 1)])]),
+            &interface(vec![spec_enum("Status", &[("Active", 0)])]),
+            policy,
+        );
+        assert_eq!(removal.status, CompatibilityStatus::Incompatible);
+        let value_change = assess(
+            &interface(vec![spec_enum("Status", &[("Active", 0)])]),
+            &interface(vec![spec_enum("Status", &[("Active", 7)])]),
+            policy,
+        );
+        assert_eq!(value_change.status, CompatibilityStatus::Incompatible);
+
+        // Struct and union additions remain governed by type_change_is_breaking.
+        let struct_change = assess(
+            &interface(vec![spec_struct("Config", &[("a", ScSpecTypeDef::U32)])]),
+            &interface(vec![spec_struct(
+                "Config",
+                &[("a", ScSpecTypeDef::U32), ("b", ScSpecTypeDef::U64)],
+            )]),
+            policy,
+        );
+        assert_eq!(struct_change.status, CompatibilityStatus::Incompatible);
+        let union_change = assess(
+            &interface(vec![spec_union("Payload", &[("None", None)])]),
+            &interface(vec![spec_union(
+                "Payload",
+                &[("None", None), ("Some", Some(vec![ScSpecTypeDef::U32]))],
+            )]),
+            policy,
+        );
+        assert_eq!(union_change.status, CompatibilityStatus::Incompatible);
+
+        // Function and event rules are untouched by the flag.
+        let function_change = assess(
+            &interface(vec![spec_function("f", &[("x", ScSpecTypeDef::U32)], None)]),
+            &interface(vec![spec_function("f", &[("x", ScSpecTypeDef::U64)], None)]),
+            policy,
+        );
+        assert_eq!(function_change.status, CompatibilityStatus::Incompatible);
+        let event_removal = assess(
+            &interface(vec![
+                spec_function("keep", &[], None),
+                spec_event("e", &[], &[]),
+            ]),
+            &interface(vec![spec_function("keep", &[], None)]),
+            policy,
+        );
+        assert_eq!(event_removal.status, CompatibilityStatus::Incompatible);
+    }
+
+    #[test]
+    fn error_enum_addition_follows_the_same_flag() {
+        let old = interface(vec![spec_error_enum("Error", &[("NotFound", 1)])]);
+        let new = interface(vec![spec_error_enum(
+            "Error",
+            &[("NotFound", 1), ("Denied", 2)],
+        )]);
+        assert_eq!(
+            assess(&old, &new, CompatibilityPolicy::strict()).status,
+            CompatibilityStatus::Incompatible
+        );
+        let mut policy = CompatibilityPolicy::strict();
+        policy.enum_case_addition_is_breaking = false;
+        assert_eq!(
+            assess(&old, &new, policy).status,
+            CompatibilityStatus::Compatible
         );
     }
 

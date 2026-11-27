@@ -18,6 +18,7 @@
 //! | Type removed | breaking |
 //! | Type renamed (identical shape) | breaking |
 //! | Type definition changed | breaking |
+//! | Enum case added (existing cases unchanged) | breaking |
 //! | Type documentation only | informational |
 //! | Event added | non-breaking |
 //! | Event removed | breaking |
@@ -61,6 +62,9 @@ pub enum ChangeKind {
     TypeRenamed,
     /// A type changed.
     TypeChanged,
+    /// One or more cases were added to an existing enum or error enum while
+    /// every existing case kept its name, value, and relative order.
+    EnumCaseAdded,
     /// An event was added.
     EventAdded,
     /// An event was removed.
@@ -82,11 +86,12 @@ impl ChangeKind {
             ChangeKind::TypeRemoved => 4,
             ChangeKind::TypeRenamed => 5,
             ChangeKind::TypeChanged => 6,
-            ChangeKind::TypeAdded => 7,
-            ChangeKind::EventRemoved => 8,
-            ChangeKind::EventRenamed => 9,
-            ChangeKind::EventChanged => 10,
-            ChangeKind::EventAdded => 11,
+            ChangeKind::EnumCaseAdded => 7,
+            ChangeKind::TypeAdded => 8,
+            ChangeKind::EventRemoved => 9,
+            ChangeKind::EventRenamed => 10,
+            ChangeKind::EventChanged => 11,
+            ChangeKind::EventAdded => 12,
         }
     }
 }
@@ -344,11 +349,23 @@ fn diff_types(old: &ContractInterface, new: &ContractInterface, out: &mut Vec<Ch
     for (name, old_entry) in &old_types {
         if let Some(new_entry) = new_types.get(name) {
             if old_entry.render != new_entry.render {
+                let (kind, detail) = match added_enum_cases(
+                    old_entry.kind,
+                    new_entry.kind,
+                    &old_entry.cases,
+                    &new_entry.cases,
+                ) {
+                    Some(added) => (
+                        ChangeKind::EnumCaseAdded,
+                        describe_enum_case_addition(old_entry.kind, name, &added),
+                    ),
+                    None => (ChangeKind::TypeChanged, format!("type `{name}` changed")),
+                };
                 out.push(Change {
-                    kind: ChangeKind::TypeChanged,
+                    kind,
                     severity: Severity::Breaking,
                     path: format!("type::{name}"),
-                    detail: format!("type `{name}` changed"),
+                    detail,
                     old: Some(old_entry.render.clone()),
                     new: Some(new_entry.render.clone()),
                 });
@@ -562,9 +579,37 @@ fn event_shape_key(event: &SpecEvent) -> String {
     format!("event[{prefix_topics}]({params}){}", event.data_format)
 }
 
+/// The declaration kind behind a user-defined type. It prevents an enum from
+/// being confused with a struct, union, or error enum during classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeKind {
+    Struct,
+    Union,
+    Enum,
+    ErrorEnum,
+}
+
+impl TypeKind {
+    fn label(self) -> &'static str {
+        match self {
+            TypeKind::Struct => "struct",
+            TypeKind::Union => "union",
+            TypeKind::Enum => "enum",
+            TypeKind::ErrorEnum => "error enum",
+        }
+    }
+
+    fn is_enum(self) -> bool {
+        matches!(self, TypeKind::Enum | TypeKind::ErrorEnum)
+    }
+}
+
 struct TypeEntry {
     render: String,
     shape: String,
+    kind: TypeKind,
+    /// `(name, value)` pairs for enums; empty for other type kinds.
+    cases: Vec<(String, u32)>,
 }
 
 fn type_map(interface: &ContractInterface) -> std::collections::BTreeMap<String, TypeEntry> {
@@ -575,6 +620,8 @@ fn type_map(interface: &ContractInterface) -> std::collections::BTreeMap<String,
             TypeEntry {
                 render: render_struct(item),
                 shape: struct_shape_key(item),
+                kind: TypeKind::Struct,
+                cases: Vec::new(),
             },
         );
     }
@@ -584,6 +631,8 @@ fn type_map(interface: &ContractInterface) -> std::collections::BTreeMap<String,
             TypeEntry {
                 render: render_union(item),
                 shape: union_shape_key(item),
+                kind: TypeKind::Union,
+                cases: Vec::new(),
             },
         );
     }
@@ -593,6 +642,8 @@ fn type_map(interface: &ContractInterface) -> std::collections::BTreeMap<String,
             TypeEntry {
                 render: render_enum(&item.name, &item.cases),
                 shape: enum_shape_key("enum", &item.cases),
+                kind: TypeKind::Enum,
+                cases: enum_cases(&item.cases),
             },
         );
     }
@@ -602,10 +653,52 @@ fn type_map(interface: &ContractInterface) -> std::collections::BTreeMap<String,
             TypeEntry {
                 render: render_enum(&item.name, &item.cases),
                 shape: enum_shape_key("error_enum", &item.cases),
+                kind: TypeKind::ErrorEnum,
+                cases: enum_cases(&item.cases),
             },
         );
     }
     map
+}
+
+fn enum_cases(cases: &[observatory_spec::SpecEnumCase]) -> Vec<(String, u32)> {
+    cases
+        .iter()
+        .map(|case| (case.name.clone(), case.value))
+        .collect()
+}
+
+/// Return the added cases only when `old` is a subsequence of `new` (names,
+/// values, and relative order preserved) and at least one case was appended or
+/// inserted. A removal or a value change stays a generic type change.
+fn added_enum_cases(
+    old_kind: TypeKind,
+    new_kind: TypeKind,
+    old: &[(String, u32)],
+    new: &[(String, u32)],
+) -> Option<Vec<String>> {
+    if old_kind != new_kind || !old_kind.is_enum() || new.len() <= old.len() {
+        return None;
+    }
+    let mut next = 0;
+    let mut added = Vec::new();
+    for case in new {
+        if old.get(next) == Some(case) {
+            next += 1;
+        } else {
+            added.push(format!("`{}` = {}", case.0, case.1));
+        }
+    }
+    (next == old.len() && !added.is_empty()).then_some(added)
+}
+
+fn describe_enum_case_addition(kind: TypeKind, name: &str, added: &[String]) -> String {
+    let cases = added.join(", ");
+    if added.len() == 1 {
+        format!("{} `{name}` added case {cases}", kind.label())
+    } else {
+        format!("{} `{name}` added cases {cases}", kind.label())
+    }
 }
 
 fn group_types_by_shape<'a>(
@@ -1382,6 +1475,89 @@ mod tests {
             Severity::Breaking,
             "type::Changed",
         );
+    }
+
+    #[test]
+    fn change_kind_enum_case_added() {
+        assert_single_change(
+            vec![spec_enum("Status", &[("Active", 0)])],
+            vec![spec_enum("Status", &[("Active", 0), ("Paused", 1)])],
+            ChangeKind::EnumCaseAdded,
+            Severity::Breaking,
+            "type::Status",
+        );
+        let result = diff(
+            &interface(vec![spec_enum("Status", &[("Active", 0)])]),
+            &interface(vec![spec_enum("Status", &[("Active", 0), ("Paused", 1)])]),
+        );
+        assert!(result.changes[0].detail.contains("added case `Paused` = 1"));
+        assert_eq!(result.summary.by_kind[&ChangeKind::EnumCaseAdded], 1);
+        assert!(!result
+            .summary
+            .by_kind
+            .contains_key(&ChangeKind::TypeChanged));
+    }
+
+    #[test]
+    fn change_kind_error_enum_case_added() {
+        assert_single_change(
+            vec![spec_error_enum("Error", &[("NotFound", 1)])],
+            vec![spec_error_enum("Error", &[("NotFound", 1), ("Denied", 2)])],
+            ChangeKind::EnumCaseAdded,
+            Severity::Breaking,
+            "type::Error",
+        );
+        let result = diff(
+            &interface(vec![spec_error_enum("Error", &[("NotFound", 1)])]),
+            &interface(vec![spec_error_enum(
+                "Error",
+                &[("NotFound", 1), ("Denied", 2)],
+            )]),
+        );
+        assert!(result.changes[0].detail.starts_with("error enum `Error`"));
+    }
+
+    #[test]
+    fn enum_case_removal_and_value_change_stay_type_changed() {
+        for new in [
+            vec![spec_enum("Status", &[("Active", 0)])],
+            vec![spec_enum("Status", &[("Active", 0), ("Paused", 7)])],
+        ] {
+            let result = diff(
+                &interface(vec![spec_enum("Status", &[("Active", 0), ("Paused", 1)])]),
+                &interface(new),
+            );
+            assert_eq!(result.changes.len(), 1);
+            assert_eq!(result.changes[0].kind, ChangeKind::TypeChanged);
+        }
+    }
+
+    #[test]
+    fn struct_and_union_case_additions_stay_type_changed() {
+        let result = diff(
+            &interface(vec![
+                spec_struct("Config", &[("owner", ScSpecTypeDef::Address)]),
+                spec_union("Payload", &[("None", None)]),
+            ]),
+            &interface(vec![
+                spec_struct(
+                    "Config",
+                    &[
+                        ("owner", ScSpecTypeDef::Address),
+                        ("limit", ScSpecTypeDef::U32),
+                    ],
+                ),
+                spec_union(
+                    "Payload",
+                    &[("None", None), ("Some", Some(vec![ScSpecTypeDef::U32]))],
+                ),
+            ]),
+        );
+        assert_eq!(result.changes.len(), 2);
+        assert!(result
+            .changes
+            .iter()
+            .all(|change| change.kind == ChangeKind::TypeChanged));
     }
 
     #[test]

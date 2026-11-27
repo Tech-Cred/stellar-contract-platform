@@ -2,6 +2,7 @@
 //! pipeline against deterministic fixtures; no network access is required.
 
 use std::io::Write;
+use std::path::Path;
 
 use assert_cmd::Command;
 use observatory_testutil::spec::{
@@ -998,6 +999,45 @@ fn config_file_selects_compatibility_policy() {
 }
 
 #[test]
+fn enum_addition_fixture_respects_the_policy_flag() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/compat/enum-addition");
+    let baseline = dir.join("baseline.wasm");
+    let head = dir.join("head.wasm");
+    let policy = dir.join("policy.json");
+
+    binary()
+        .args([
+            "compat",
+            baseline.to_str().unwrap(),
+            head.to_str().unwrap(),
+            "--policy",
+            "strict",
+            "--json",
+        ])
+        .assert()
+        .code(6)
+        .stdout(predicate::str::contains("\"status\": \"incompatible\""))
+        .stdout(predicate::str::contains("enum_case_added"))
+        .stdout(predicate::str::contains("`Paused` = 1"));
+
+    binary()
+        .args([
+            "compat",
+            baseline.to_str().unwrap(),
+            head.to_str().unwrap(),
+            "--policy-file",
+            policy.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"compatible\""))
+        .stdout(predicate::str::contains(
+            "\"enum_case_addition_is_breaking\": false",
+        ));
+}
+
+#[test]
 fn policy_file_selects_rules_and_echoes_the_resolved_policy() {
     let old = write_temp(
         &module_with_spec(&[spec_function("a", &[], None), spec_function("b", &[], None)]),
@@ -1009,6 +1049,7 @@ fn policy_file_selects_rules_and_echoes_the_resolved_policy() {
           signature_change_is_breaking: false\n\
           type_removal_is_breaking: false\n\
           type_change_is_breaking: false\n\
+          enum_case_addition_is_breaking: false\n\
           event_removal_is_breaking: false\n\
           event_change_is_breaking: false\n",
         ".yml",

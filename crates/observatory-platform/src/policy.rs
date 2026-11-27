@@ -42,6 +42,7 @@ function_removal_is_breaking: true
 signature_change_is_breaking: true
 type_removal_is_breaking: true
 type_change_is_breaking: true
+enum_case_addition_is_breaking: true
 event_removal_is_breaking: true
 event_change_is_breaking: true
 ";
@@ -51,6 +52,7 @@ function_removal_is_breaking: false
 signature_change_is_breaking: false
 type_removal_is_breaking: false
 type_change_is_breaking: false
+enum_case_addition_is_breaking: false
 event_removal_is_breaking: false
 event_change_is_breaking: false
 ";
@@ -60,6 +62,17 @@ event_change_is_breaking: false
         let policy = parse_policy(STRICT_YAML, ConfigFormat::Yaml).unwrap();
         assert!(policy.function_removal_is_breaking);
         assert!(policy.event_change_is_breaking);
+    }
+
+    #[test]
+    fn enum_addition_rule_is_independent_of_type_changes() {
+        let input = STRICT_YAML.replace(
+            "enum_case_addition_is_breaking: true",
+            "enum_case_addition_is_breaking: false",
+        );
+        let policy = parse_policy(&input, ConfigFormat::Yaml).unwrap();
+        assert!(policy.type_change_is_breaking);
+        assert!(!policy.enum_case_addition_is_breaking);
     }
 
     #[test]
@@ -103,6 +116,7 @@ event_change_is_breaking: false
                 "signature_change_is_breaking": false,
                 "type_removal_is_breaking": false,
                 "type_change_is_breaking": false,
+                "enum_case_addition_is_breaking": false,
                 "event_removal_is_breaking": false,
                 "event_change_is_breaking": false
             }"#;

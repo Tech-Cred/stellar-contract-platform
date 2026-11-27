@@ -7,7 +7,8 @@ each change a default severity. It never claims compatibility; that is
 ## Change kinds
 
 Functions: `function_added`, `function_removed`, `function_changed`, `function_renamed`.
-Types: `type_added`, `type_removed`, `type_changed`, `type_renamed`.
+Types: `type_added`, `type_removed`, `type_changed`, `type_renamed`,
+`enum_case_added`.
 Events: `event_added`, `event_removed`, `event_changed`, `event_renamed`.
 
 ## Default severity rules
@@ -22,6 +23,7 @@ Events: `event_added`, `event_removed`, `event_changed`, `event_renamed`.
 | Type removed | breaking |
 | Type renamed (identical shape) | breaking |
 | Type definition changed | breaking |
+| Enum case added (existing cases unchanged) | breaking |
 | Type documentation only | informational |
 | Event added | non-breaking |
 | Event removed | breaking |
@@ -89,6 +91,15 @@ This is a confidence rule, not proof of intent. The matching signature is what
 raises confidence; the change detail marks the pairing as heuristic so readers
 can check the old and new renderings. A removal and addition with different
 signatures always stay separate.
+
+## Enum case additions
+
+Adding one or more cases to an existing enum or error enum is reported as
+`enum_case_added` when every old case keeps its name, value, and relative order.
+The detail names the added cases. A removal, a changed value, or a change from
+enum to error enum stays `type_changed`. This gives `observatory-compat` a
+precise signal for its `enum_case_addition_is_breaking` rule without changing
+how other type changes are classified.
 
 ## Type renames
 

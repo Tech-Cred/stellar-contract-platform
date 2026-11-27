@@ -1,0 +1,9 @@
+{
+  "function_removal_is_breaking": true,
+  "signature_change_is_breaking": true,
+  "type_removal_is_breaking": true,
+  "type_change_is_breaking": true,
+  "enum_case_addition_is_breaking": false,
+  "event_removal_is_breaking": true,
+  "event_change_is_breaking": true
+}

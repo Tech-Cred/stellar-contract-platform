@@ -22,6 +22,7 @@
       }
     },
     "policy": {
+      "enum_case_addition_is_breaking": true,
       "event_change_is_breaking": true,
       "event_removal_is_breaking": true,
       "function_removal_is_breaking": true,
